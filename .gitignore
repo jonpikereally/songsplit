@@ -1,0 +1,25 @@
+# Audio and playlist data (personal, and far too large for git)
+*.wav
+*.aif
+*.aiff
+*.flac
+*.mp3
+*.m4a
+*.csv
+done/
+
+# Build output
+build/
+SongSplit.app/
+
+# Audit run output (library-specific logs and reports)
+audit/*.json
+audit/*.jsonl
+audit/*.log
+audit/*.out
+
+# macOS / tooling
+.DS_Store
+__pycache__/
+*.pyc
+.claude/
