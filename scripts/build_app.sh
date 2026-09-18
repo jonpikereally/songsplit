@@ -21,9 +21,18 @@ if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$(git status --porcelain)" ]
 fi
 DATE="$(date -u +'%Y-%m-%d %H:%M UTC')"
 
+# Minimum macOS the app runs on. Must match LSMinimumSystemVersion in
+# src/Info.plist. Without an explicit target, swiftc uses the build machine's
+# own macOS version, and the app refuses to launch on anything older.
+MIN_MACOS="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" src/Info.plist)"
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O src/main.swift -o "$APP/Contents/MacOS/SongSplit"
+# Universal binary: one slice per architecture, joined with lipo.
+swiftc -O -target "arm64-apple-macos$MIN_MACOS"  src/main.swift -o "$OUT/SongSplit-arm64"
+swiftc -O -target "x86_64-apple-macos$MIN_MACOS" src/main.swift -o "$OUT/SongSplit-x86_64"
+lipo -create "$OUT/SongSplit-arm64" "$OUT/SongSplit-x86_64" -output "$APP/Contents/MacOS/SongSplit"
+rm -f "$OUT/SongSplit-arm64" "$OUT/SongSplit-x86_64"
 cp src/Info.plist "$PLIST"
 cp songsplit.py "$APP/Contents/Resources/songsplit.py"
 
@@ -34,4 +43,4 @@ $PB -c "Add :SongSplitBuildDate string '$DATE'" "$PLIST"
 $PB -c "Add :SongSplitGitCommit string $COMMIT" "$PLIST"
 
 codesign --force --sign - "$APP"
-echo "Built $APP — version $VERSION, build $BUILD ($COMMIT), $DATE"
+echo "Built $APP — version $VERSION, build $BUILD ($COMMIT), $DATE, macOS $MIN_MACOS+ ($(lipo -archs "$APP/Contents/MacOS/SongSplit"))"
