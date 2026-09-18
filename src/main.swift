@@ -124,46 +124,196 @@ enum Updater {
     }
 }
 
+// MARK: - drawing helpers
+
+func symbol(_ name: String, _ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSImage? {
+    NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: weight))
+}
+
+/// A flat rounded card. Colours are resolved in draw(_:), so it follows light/dark mode.
+class Card: NSView {
+    var fillColor: NSColor = .clear { didSet { needsDisplay = true } }
+    var strokeColor: NSColor? = nil { didSet { needsDisplay = true } }
+    var cornerRadius: CGFloat = 12 { didSet { layer?.cornerRadius = cornerRadius; needsDisplay = true } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = cornerRadius
+        layer?.masksToBounds = true
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func draw(_ r: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: cornerRadius, yRadius: cornerRadius)
+        fillColor.setFill()
+        path.fill()
+        if let s = strokeColor {
+            s.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+}
+
+/// The app icon shown in the window header: a waveform on an accent-coloured gradient tile.
+final class IconTile: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        let glyph = NSImageView()
+        glyph.image = symbol("waveform", 24, .bold)
+        glyph.contentTintColor = .white
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(glyph)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 48),
+            heightAnchor.constraint(equalToConstant: 48),
+            glyph.centerXAnchor.constraint(equalTo: centerXAnchor),
+            glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func draw(_ r: NSRect) {
+        let accent = NSColor.controlAccentColor
+        let top = accent.blended(withFraction: 0.22, of: .white) ?? accent
+        let bottom = accent.blended(withFraction: 0.22, of: .black) ?? accent
+        let path = NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12)
+        NSGradient(starting: top, ending: bottom)?.draw(in: path, angle: -90)
+        NSColor.black.withAlphaComponent(0.18).setStroke()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12).stroke()
+    }
+}
+
+/// Coloured dot used in the status pill.
+final class Dot: NSView {
+    var color: NSColor = .tertiaryLabelColor { didSet { needsDisplay = true } }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 8),
+                                     heightAnchor.constraint(equalToConstant: 8)])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ r: NSRect) {
+        color.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+    }
+}
+
+/// "● Ready" pill: a dot (or a spinner while busy) and a short message.
+final class StatusPill: Card {
+    private let dot = Dot()
+    private let spinner = NSProgressIndicator()
+    private let text = NSTextField(labelWithString: "Ready")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        cornerRadius = 13
+        fillColor = NSColor.labelColor.withAlphaComponent(0.06)
+
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = true
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+
+        text.font = .systemFont(ofSize: 12, weight: .medium)
+        text.textColor = .secondaryLabelColor
+        text.lineBreakMode = .byTruncatingTail
+        text.maximumNumberOfLines = 1
+        text.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSStackView(views: [dot, spinner, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 7
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heightAnchor.constraint(equalToConstant: 26),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(_ message: String, _ color: NSColor, busy: Bool = false) {
+        text.stringValue = message
+        text.textColor = busy ? .labelColor : color
+        dot.color = color
+        dot.isHidden = busy
+        spinner.isHidden = !busy
+        if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+    }
+}
+
 // MARK: - drop target
 
 final class DropView: NSView {
     var onDrop: (([URL]) -> Void)?
-    private var lit = false
+    var onClick: (() -> Void)?
+    var hasFiles = false { didSet { needsDisplay = true } }
+    private var lit = false { didSet { needsDisplay = true } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
         wantsLayer = true
-        layer?.cornerRadius = 10
+        translatesAutoresizingMaskIntoConstraints = false
     }
     required init?(coder: NSCoder) { fatalError() }
+    override var mouseDownCanMoveWindow: Bool { false }
 
     private func urls(_ sender: NSDraggingInfo) -> [URL] {
         (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
     }
     override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
-        lit = !urls(s).isEmpty; needsDisplay = true
+        lit = !urls(s).isEmpty
         return lit ? .copy : []
     }
-    override func draggingExited(_ s: NSDraggingInfo?) { lit = false; needsDisplay = true }
+    override func draggingExited(_ s: NSDraggingInfo?) { lit = false }
     override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
-        lit = false; needsDisplay = true
+        lit = false
         let u = urls(s)
         if u.isEmpty { return false }
         onDrop?(u)
         return true
     }
+    // Clicking the empty zone opens the file chooser, like a web drop zone.
+    override func mouseDown(with e: NSEvent) {
+        if hasFiles { super.mouseDown(with: e) } else { onClick?() }
+    }
+
     override func draw(_ r: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                                xRadius: 10, yRadius: 10)
-        (lit ? NSColor.controlAccentColor.withAlphaComponent(0.10)
-             : NSColor.textBackgroundColor).setFill()
+        let accent = NSColor.controlAccentColor
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 14, yRadius: 14)
+        let fill: NSColor
+        if lit { fill = accent.withAlphaComponent(0.16) }
+        else if hasFiles { fill = accent.withAlphaComponent(0.07) }
+        else { fill = NSColor.labelColor.withAlphaComponent(0.035) }
+        fill.setFill()
         path.fill()
+
         path.lineWidth = lit ? 2 : 1
-        let dash: [CGFloat] = lit ? [] : [5, 4]
-        path.setLineDash(dash, count: dash.count, phase: 0)
-        (lit ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        if !lit && !hasFiles {
+            let dash: [CGFloat] = [6, 4]
+            path.setLineDash(dash, count: dash.count, phase: 0)
+        }
+        let stroke: NSColor
+        if lit { stroke = accent }
+        else if hasFiles { stroke = accent.withAlphaComponent(0.55) }
+        else { stroke = NSColor.separatorColor }
+        stroke.setStroke()
         path.stroke()
     }
 }
@@ -173,10 +323,13 @@ final class DropView: NSView {
 final class Controller: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var drop: DropView!
+    var dropIcon: NSImageView!
     var fileLabel: NSTextField!
     var csvLabel: NSTextField!
-    var status: NSTextField!
+    var clearButton: NSButton!
+    var status: StatusPill!
     var logView: NSTextView!
+    var logPlaceholder: NSTextField!
     var bar: NSProgressIndicator!
     var goButton: NSButton!
     var stopButton: NSButton!
@@ -191,119 +344,171 @@ final class Controller: NSObject, NSApplicationDelegate {
 
     // ---------- layout
     func applicationDidFinishLaunching(_ n: Notification) {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
-                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 660),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         w.title = "SongSplit"
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
+        w.minSize = NSSize(width: 680, height: 560)
         w.center()
-        w.minSize = NSSize(width: 660, height: 520)
+        w.setFrameAutosaveName("SongSplitMain")
         window = w
 
-        let root = NSView(frame: w.contentView!.bounds)
-        root.autoresizingMask = [.width, .height]
+        let root = NSView()
         w.contentView = root
 
-        let title = label("SongSplit", size: 22, weight: .bold)
-        title.frame = NSRect(x: 24, y: 566, width: 400, height: 30)
-        title.autoresizingMask = [.minYMargin]
-        root.addSubview(title)
+        // ----- header: icon tile, title + tagline, version + update button
+        let tile = IconTile()
 
+        let title = label("SongSplit", size: 26, weight: .bold)
+        if let d = title.font?.fontDescriptor.withDesign(.rounded) {
+            title.font = NSFont(descriptor: d, size: 26) ?? title.font
+        }
         let sub = label("Split one long recording into separate, tagged songs.",
-                        size: 12, weight: .regular, secondary: true)
-        sub.frame = NSRect(x: 24, y: 545, width: 400, height: 18)
-        sub.autoresizingMask = [.minYMargin]
-        root.addSubview(sub)
+                        size: 13, weight: .regular, color: .secondaryLabelColor)
+        let titleCol = vstack([title, sub], spacing: 2, alignment: .leading)
 
-        let ver = label(BuildInfo.summary, size: 11, weight: .regular, secondary: true)
+        let ver = label("Version \(BuildInfo.version) · build \(BuildInfo.build)",
+                        size: 11, weight: .medium, color: .secondaryLabelColor)
         ver.alignment = .right
-        ver.frame = NSRect(x: 336, y: 572, width: 400, height: 18)
-        ver.autoresizingMask = [.minXMargin, .minYMargin]
-        root.addSubview(ver)
-
-        let upd = button("Check for Updates…", #selector(checkForUpdatesClicked))
+        let built = label("\(BuildInfo.date) · \(BuildInfo.commit)",
+                          size: 10, weight: .regular, color: .tertiaryLabelColor)
+        built.alignment = .right
+        built.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let upd = button("Check for Updates…", symbol: "arrow.triangle.2.circlepath",
+                         #selector(checkForUpdatesClicked))
         upd.controlSize = .small
         upd.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        upd.frame = NSRect(x: 596, y: 543, width: 140, height: 22)
-        upd.autoresizingMask = [.minXMargin, .minYMargin]
-        root.addSubview(upd)
+        let verCol = vstack([ver, built, upd], spacing: 3, alignment: .trailing)
+        verCol.setCustomSpacing(8, after: built)
 
-        drop = DropView(frame: NSRect(x: 24, y: 432, width: 712, height: 104))
-        drop.autoresizingMask = [.width, .minYMargin]
+        let header = hstack([tile, titleCol, spacer(), verCol], spacing: 14, alignment: .centerY)
+
+        // ----- drop zone
+        drop = DropView()
         drop.onDrop = { [weak self] urls in self?.accept(urls) }
-        root.addSubview(drop)
+        drop.onClick = { [weak self] in self?.pickAudio() }
 
-        fileLabel = label("", size: 13, weight: .medium)
-        fileLabel.frame = NSRect(x: 16, y: 60, width: 680, height: 20)
-        fileLabel.autoresizingMask = [.width]
-        drop.addSubview(fileLabel)
+        dropIcon = NSImageView()
+        dropIcon.translatesAutoresizingMaskIntoConstraints = false
+        dropIcon.imageScaling = .scaleNone
 
-        csvLabel = label("", size: 11, weight: .regular, secondary: true)
-        csvLabel.frame = NSRect(x: 16, y: 40, width: 680, height: 18)
-        csvLabel.autoresizingMask = [.width]
-        drop.addSubview(csvLabel)
+        fileLabel = label("", size: 14, weight: .semibold)
+        fileLabel.alignment = .center
+        fileLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        csvLabel = label("", size: 11.5, weight: .regular, color: .secondaryLabelColor)
+        csvLabel.alignment = .center
+        csvLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let pick = button("Choose audio…", #selector(pickAudio))
-        pick.frame = NSRect(x: 16, y: 10, width: 130, height: 24)
-        drop.addSubview(pick)
-        let pickCsv = button("Add playlist CSV…", #selector(pickCSV))
-        pickCsv.frame = NSRect(x: 152, y: 10, width: 150, height: 24)
-        drop.addSubview(pickCsv)
-        let clear = button("Clear", #selector(clearFiles))
-        clear.frame = NSRect(x: 308, y: 10, width: 70, height: 24)
-        drop.addSubview(clear)
+        let pick = button("Choose Audio…", symbol: "folder", #selector(pickAudio))
+        let pickCsv = button("Add Playlist CSV…", symbol: "doc.text", #selector(pickCSV))
+        clearButton = button("Clear", symbol: "xmark.circle", #selector(clearFiles))
+        let pickRow = hstack([pick, pickCsv, clearButton], spacing: 8, alignment: .centerY)
 
+        let dropStack = vstack([dropIcon, fileLabel, csvLabel, pickRow], spacing: 4, alignment: .centerX)
+        dropStack.setCustomSpacing(10, after: dropIcon)
+        dropStack.setCustomSpacing(14, after: csvLabel)
+        drop.addSubview(dropStack)
+        NSLayoutConstraint.activate([
+            drop.heightAnchor.constraint(equalToConstant: 172),
+            dropStack.centerXAnchor.constraint(equalTo: drop.centerXAnchor),
+            dropStack.centerYAnchor.constraint(equalTo: drop.centerYAnchor),
+            dropStack.widthAnchor.constraint(lessThanOrEqualTo: drop.widthAnchor, constant: -40),
+        ])
+
+        // ----- options
         dryBox = checkbox("Preview only — write nothing")
-        dryBox.frame = NSRect(x: 24, y: 400, width: 240, height: 20)
-        dryBox.autoresizingMask = [.minYMargin]
-        root.addSubview(dryBox)
-
         offlineBox = checkbox("Skip song identification (offline)")
-        offlineBox.frame = NSRect(x: 280, y: 400, width: 260, height: 20)
-        offlineBox.autoresizingMask = [.minYMargin]
-        root.addSubview(offlineBox)
+        let options = hstack([dryBox, offlineBox, spacer()], spacing: 24, alignment: .centerY)
 
-        goButton = button("Split", #selector(start))
-        goButton.frame = NSRect(x: 24, y: 362, width: 90, height: 28)
+        // ----- actions + status
+        goButton = button("Split", symbol: "scissors", #selector(start))
         goButton.keyEquivalent = "\r"
-        goButton.bezelStyle = .rounded
-        goButton.autoresizingMask = [.minYMargin]
-        root.addSubview(goButton)
+        goButton.controlSize = .large
+        goButton.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        stopButton = button("Stop", #selector(stop))
-        stopButton.frame = NSRect(x: 122, y: 362, width: 70, height: 28)
+        stopButton = button("Stop", symbol: "stop.fill", #selector(stop))
+        stopButton.controlSize = .large
         stopButton.isEnabled = false
-        stopButton.autoresizingMask = [.minYMargin]
-        root.addSubview(stopButton)
 
-        revealButton = button("Show in Finder", #selector(reveal))
-        revealButton.frame = NSRect(x: 200, y: 362, width: 130, height: 28)
+        revealButton = button("Show in Finder", symbol: "folder", #selector(reveal))
+        revealButton.controlSize = .large
         revealButton.isEnabled = false
-        revealButton.autoresizingMask = [.minYMargin]
-        root.addSubview(revealButton)
 
-        status = label("Ready", size: 11, weight: .regular, secondary: true)
-        status.alignment = .right
-        status.frame = NSRect(x: 500, y: 368, width: 236, height: 18)
-        status.autoresizingMask = [.minXMargin, .minYMargin]
-        root.addSubview(status)
+        status = StatusPill()
+        status.set("Ready", .tertiaryLabelColor)
 
-        bar = NSProgressIndicator(frame: NSRect(x: 24, y: 340, width: 712, height: 12))
+        let actions = hstack([goButton, stopButton, revealButton, spacer(), status],
+                             spacing: 8, alignment: .centerY)
+        actions.setCustomSpacing(16, after: stopButton)
+
+        bar = NSProgressIndicator()
         bar.isIndeterminate = true
         bar.style = .bar
-        bar.autoresizingMask = [.width, .minYMargin]
-        root.addSubview(bar)
+        bar.controlSize = .small
+        bar.isDisplayedWhenStopped = false
+        bar.translatesAutoresizingMaskIntoConstraints = false
 
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 24, width: 712, height: 300))
-        scroll.autoresizingMask = [.width, .height]
+        // ----- log card
+        let logCard = Card()
+        logCard.cornerRadius = 10
+        logCard.fillColor = .textBackgroundColor
+        logCard.strokeColor = .separatorColor
+        logCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
-        scroll.borderType = .lineBorder
-        logView = NSTextView(frame: scroll.bounds)
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        logView = NSTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 300))
         logView.isEditable = false
-        logView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.textContainerInset = NSSize(width: 8, height: 8)
+        logView.drawsBackground = false
+        logView.font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        logView.textContainerInset = NSSize(width: 12, height: 12)
+        logView.isVerticallyResizable = true
+        logView.isHorizontallyResizable = false
+        logView.minSize = NSSize(width: 0, height: 0)
+        logView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                 height: CGFloat.greatestFiniteMagnitude)
+        logView.textContainer?.widthTracksTextView = true
         logView.autoresizingMask = [.width]
         scroll.documentView = logView
-        root.addSubview(scroll)
+        logCard.addSubview(scroll)
+
+        logPlaceholder = label("Progress and results will appear here.",
+                               size: 12, weight: .regular, color: .tertiaryLabelColor)
+        logPlaceholder.alignment = .center
+        logCard.addSubview(logPlaceholder)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: logCard.leadingAnchor, constant: 1),
+            scroll.trailingAnchor.constraint(equalTo: logCard.trailingAnchor, constant: -1),
+            scroll.topAnchor.constraint(equalTo: logCard.topAnchor, constant: 1),
+            scroll.bottomAnchor.constraint(equalTo: logCard.bottomAnchor, constant: -1),
+            logPlaceholder.centerXAnchor.constraint(equalTo: logCard.centerXAnchor),
+            logPlaceholder.centerYAnchor.constraint(equalTo: logCard.centerYAnchor),
+        ])
+
+        // ----- assemble
+        let column = vstack([header, drop, options, actions, bar, logCard],
+                            spacing: 16, alignment: .leading)
+        column.setCustomSpacing(22, after: header)
+        column.setCustomSpacing(12, after: drop)
+        column.setCustomSpacing(10, after: actions)
+        column.setCustomSpacing(10, after: bar)
+        root.addSubview(column)
+        var cs = [
+            column.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
+            column.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
+            column.topAnchor.constraint(equalTo: root.topAnchor, constant: 44),
+            column.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24),
+        ]
+        for row in column.arrangedSubviews {
+            cs.append(row.widthAnchor.constraint(equalTo: column.widthAnchor))
+        }
+        NSLayoutConstraint.activate(cs)
 
         refresh()
         w.makeKeyAndOrderFront(nil)
@@ -329,17 +534,18 @@ final class Controller: NSObject, NSApplicationDelegate {
     @objc func checkForUpdatesClicked() { checkForUpdates(manual: true) }
 
     func checkForUpdates(manual: Bool) {
-        if manual { setStatus("Checking for updates…", .secondaryLabelColor) }
+        if manual { setStatus("Checking for updates…", .controlAccentColor, busy: true) }
         Updater.fetchLatest { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch result {
                 case .failure(let e):
                     guard manual else { return }
-                    self.setStatus("Ready", .secondaryLabelColor)
+                    self.setStatus("Ready", .tertiaryLabelColor)
                     self.alert("Couldn't check for updates", e.localizedDescription)
                 case .success(let r):
                     if Updater.isNewer(r.version, than: BuildInfo.version) {
+                        if manual { self.setStatus("Update available", .controlAccentColor) }
                         self.offer(r)
                     } else if manual {
                         self.setStatus("Up to date", .systemGreen)
@@ -370,7 +576,7 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     func install(_ zip: URL, page: URL) {
-        setStatus("Downloading update…", .labelColor)
+        setStatus("Downloading update…", .controlAccentColor, busy: true)
         bar.startAnimation(nil)
         goButton.isEnabled = false
         Updater.download(zip) { [weak self] result in
@@ -401,7 +607,7 @@ final class Controller: NSObject, NSApplicationDelegate {
         }
     }
 
-    func setStatus(_ s: String, _ c: NSColor) { status.stringValue = s; status.textColor = c }
+    func setStatus(_ s: String, _ c: NSColor, busy: Bool = false) { status.set(s, c, busy: busy) }
 
     func alert(_ title: String, _ text: String) {
         let a = NSAlert()
@@ -416,21 +622,55 @@ final class Controller: NSObject, NSApplicationDelegate {
 
     // ---------- helpers
     func label(_ s: String, size: CGFloat, weight: NSFont.Weight,
-               secondary: Bool = false) -> NSTextField {
+               color: NSColor = .labelColor) -> NSTextField {
         let t = NSTextField(labelWithString: s)
         t.font = .systemFont(ofSize: size, weight: weight)
-        if secondary { t.textColor = .secondaryLabelColor }
+        t.textColor = color
         t.lineBreakMode = .byTruncatingMiddle
+        t.maximumNumberOfLines = 1
+        t.translatesAutoresizingMaskIntoConstraints = false
         return t
     }
-    func button(_ title: String, _ sel: Selector) -> NSButton {
+    func button(_ title: String, symbol name: String? = nil, _ sel: Selector) -> NSButton {
         let b = NSButton(title: title, target: self, action: sel)
         b.bezelStyle = .rounded
+        if let name = name, let img = symbol(name, 11, .medium) {
+            b.image = img
+            b.imagePosition = .imageLeading
+            b.imageHugsTitle = true
+        }
+        b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }
     func checkbox(_ title: String) -> NSButton {
         let b = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        b.translatesAutoresizingMaskIntoConstraints = false
         return b
+    }
+    func spacer() -> NSView {
+        let v = NSView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        return v
+    }
+    func vstack(_ views: [NSView], spacing: CGFloat,
+                alignment: NSLayoutConstraint.Attribute) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.orientation = .vertical
+        s.alignment = alignment
+        s.spacing = spacing
+        s.translatesAutoresizingMaskIntoConstraints = false
+        return s
+    }
+    func hstack(_ views: [NSView], spacing: CGFloat,
+                alignment: NSLayoutConstraint.Attribute) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.orientation = .horizontal
+        s.alignment = alignment
+        s.spacing = spacing
+        s.translatesAutoresizingMaskIntoConstraints = false
+        return s
     }
 
     func accept(_ urls: [URL]) {
@@ -442,17 +682,29 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     func refresh() {
+        drop.hasFiles = !audio.isEmpty
         if audio.isEmpty {
-            fileLabel.stringValue = "Drop a WAV here, or on the app icon"
-            fileLabel.textColor = .secondaryLabelColor
-        } else {
-            fileLabel.stringValue = audio.map { $0.lastPathComponent }
-                                         .joined(separator: "   •   ")
+            dropIcon.image = symbol("waveform", 30, .regular)
+            dropIcon.contentTintColor = .tertiaryLabelColor
+            fileLabel.stringValue = "Drop a recording here"
             fileLabel.textColor = .labelColor
+            csvLabel.stringValue = csvs.isEmpty
+                ? "WAV, AIFF, FLAC, MP3 or M4A · or drop it on the app icon"
+                : "Playlist: " + csvs.map { $0.lastPathComponent }.joined(separator: ", ")
+                  + " — now add the recording"
+        } else {
+            dropIcon.image = symbol("music.note.list", 30, .regular)
+            dropIcon.contentTintColor = .controlAccentColor
+            let names = audio.map { $0.lastPathComponent }
+            fileLabel.stringValue = names.count == 1
+                ? names[0]
+                : "\(names.count) recordings · " + names.joined(separator: ", ")
+            fileLabel.textColor = .labelColor
+            csvLabel.stringValue = csvs.isEmpty
+                ? "No playlist CSV — titles will come from song identification"
+                : "Playlist: " + csvs.map { $0.lastPathComponent }.joined(separator: ", ")
         }
-        csvLabel.stringValue = csvs.isEmpty
-            ? "No playlist CSV — titles still come from song identification"
-            : "Playlist: " + csvs.map { $0.lastPathComponent }.joined(separator: ", ")
+        clearButton.isEnabled = !(audio.isEmpty && csvs.isEmpty)
         goButton.isEnabled = !audio.isEmpty && task == nil
     }
 
@@ -480,10 +732,14 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     func append(_ s: String, color: NSColor? = nil) {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 2
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: color ?? NSColor.labelColor]
+            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+            .foregroundColor: color ?? NSColor.labelColor,
+            .paragraphStyle: para]
         logView.textStorage?.append(NSAttributedString(string: s, attributes: attrs))
+        logPlaceholder.isHidden = true
         logView.scrollToEndOfDocument(nil)
     }
 
@@ -491,13 +747,13 @@ final class Controller: NSObject, NSApplicationDelegate {
     @objc func start() {
         guard task == nil, let first = audio.first else { return }
         logView.string = ""
+        logPlaceholder.isHidden = false
         outDir = nil
         revealButton.isEnabled = false
         goButton.isEnabled = false
         stopButton.isEnabled = true
         bar.startAnimation(nil)
-        status.stringValue = "Working…"
-        status.textColor = .labelColor
+        setStatus("Working…", .controlAccentColor, busy: true)
         runOne(index: 0, url: first)
     }
 
@@ -558,8 +814,7 @@ final class Controller: NSObject, NSApplicationDelegate {
         bar.stopAnimation(nil)
         stopButton.isEnabled = false
         goButton.isEnabled = !audio.isEmpty
-        status.stringValue = ok ? "Finished" : "Stopped"
-        status.textColor = ok ? .systemGreen : .systemOrange
+        setStatus(ok ? "Finished" : "Stopped", ok ? .systemGreen : .systemOrange)
         revealButton.isEnabled = (outDir != nil)
     }
 
