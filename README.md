@@ -64,6 +64,9 @@ The `Release` workflow (`.github/workflows/release.yml`) builds and zips the app
 release with the zip attached. That release is what the in-app update check looks for. The tag's
 annotation message becomes the top of the release notes.
 
+No terminal needed: on GitHub choose **Releases ▸ Draft a new release**, type `vX.Y.Z` as a new tag
+targeting `main`, and publish. The workflow then builds the app and attaches the zip to that release.
+
 `scripts/release.sh 1.2.0 "What changed"` does the same thing from a Mac with `gh` logged in.
 
 `songsplit_gui.py` is an older Tkinter front end with the same purpose.
