@@ -4,7 +4,9 @@
 # in-app update checker looks for exactly this: a release tagged vX.Y.Z
 # with a .zip asset.
 #
-# To ship a version: set VERSION to X.Y.Z on main, then push tag vX.Y.Z.
+# To ship a version: set VERSION to X.Y.Z on main, then push tag vX.Y.Z,
+# or publish a release named vX.Y.Z on the GitHub website (creating the tag
+# there also triggers this workflow, which then attaches the app to it).
 name: Release
 
 on:
@@ -53,6 +55,12 @@ jobs:
           **Install:** unzip, drag SongSplit.app to Applications. The app isn't notarized, so the first time, right-click it and choose Open. If you already have SongSplit, choose **Check for Updates…** in the app and it installs itself.
           **Requires:** ffmpeg on your PATH (\`brew install ffmpeg\`). Song identification installs its own helper on first run.
           **Build:** $(git rev-list --count HEAD) ($(git rev-parse --short HEAD)), $(date -u +'%Y-%m-%d %H:%M UTC')"
-          gh release create "$GITHUB_REF_NAME" "build/SongSplit-$VERSION.zip" \
-            --title "SongSplit $VERSION" --notes "$NOTES"
+          ZIP="build/SongSplit-$VERSION.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Release was created first (e.g. on the GitHub website): attach the app to it.
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "SongSplit $VERSION" --notes "$NOTES"
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" --title "SongSplit $VERSION" --notes "$NOTES"
+          fi
           echo "Released $GITHUB_REF_NAME"
