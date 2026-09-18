@@ -51,12 +51,20 @@ the short commit hash, and the build time.
 
 ### Cutting a release
 
+Every push to `main` and every pull request builds the app on a macOS runner (`.github/workflows/build.yml`)
+and attaches `SongSplit.zip` to the run, so any commit's build can be downloaded from the Actions tab.
+
+To publish a release, set `VERSION` to the new number on `main` and push a matching tag:
+
 ```sh
-scripts/release.sh 1.2.0 "What changed"
+git tag -a v1.2.0 -m "What changed" && git push origin v1.2.0
 ```
 
-This bumps `VERSION`, commits, tags `v1.2.0`, builds and zips the app, pushes, and publishes a
-GitHub release with the zip attached. That release is what the in-app update check looks for.
+The `Release` workflow (`.github/workflows/release.yml`) builds and zips the app and publishes a GitHub
+release with the zip attached. That release is what the in-app update check looks for. The tag's
+annotation message becomes the top of the release notes.
+
+`scripts/release.sh 1.2.0 "What changed"` does the same thing from a Mac with `gh` logged in.
 
 `songsplit_gui.py` is an older Tkinter front end with the same purpose.
 
