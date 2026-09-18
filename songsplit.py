@@ -318,16 +318,29 @@ def safe_name(s):
     return re.sub(r'[/\\:*?"<>|]', "", s).strip()
 
 
-def write_track(ffmpeg, src, a, b, is_last, meta, num, out_dir):
+def track_path(meta, num, out_dir, artist_in_name=False, artist_folders=False):
+    """Where a track goes: 'Title.wav', or 'Artist - Title.wav' with
+    --artist-in-name, inside 'out_dir/Artist/' with --artist-folders.
+    Returns the path relative to out_dir; picks a '(2)' suffix if it exists."""
     artist = meta.get("artist") or "Unknown Artist"
     title = meta.get("title") or f"Track {num}"
-    name = f"{safe_name(title)}.wav"
-    dest = os.path.join(out_dir, name)
+    stem = f"{safe_name(artist)} - {safe_name(title)}" if artist_in_name else safe_name(title)
+    folder = safe_name(artist) if artist_folders else ""
+    rel = os.path.join(folder, f"{stem}.wav")
     n = 2
-    while os.path.exists(dest):   # avoid clobbering a duplicate title
-        name = f"{safe_name(title)} ({n}).wav"
-        dest = os.path.join(out_dir, name)
+    while os.path.exists(os.path.join(out_dir, rel)):   # avoid clobbering a duplicate title
+        rel = os.path.join(folder, f"{stem} ({n}).wav")
         n += 1
+    return rel
+
+
+def write_track(ffmpeg, src, a, b, is_last, meta, num, out_dir,
+                artist_in_name=False, artist_folders=False):
+    artist = meta.get("artist") or "Unknown Artist"
+    title = meta.get("title") or f"Track {num}"
+    name = track_path(meta, num, out_dir, artist_in_name, artist_folders)
+    dest = os.path.join(out_dir, name)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
     cmd = [ffmpeg, "-y", "-v", "error", "-i", src, "-ss", f"{a:.3f}"]
     if not is_last:
         cmd += ["-to", f"{b:.3f}"]
@@ -375,6 +388,10 @@ def main():
     ap.add_argument("--tail-pad", type=float, default=1.5,
                     help="seconds of silence kept after each fade-out (default 1.5)")
     ap.add_argument("--no-shazam", action="store_true")
+    ap.add_argument("--artist-in-name", action="store_true",
+                    help="name files 'Artist - Title.wav' instead of 'Title.wav'")
+    ap.add_argument("--artist-folders", action="store_true",
+                    help="put each song in a folder named after its artist")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -480,7 +497,8 @@ def main():
               + ("  ** shorter than expected — possibly cut off" if short else ""))
 
         if not args.dry_run:
-            write_track(ffmpeg, args.input, a, b, i == len(final), meta, i, out_dir)
+            write_track(ffmpeg, args.input, a, b, i == len(final), meta, i, out_dir,
+                        args.artist_in_name, args.artist_folders)
 
     if not args.dry_run:
         print(f"\nDone. {len(final)} files written to: {out_dir}")
