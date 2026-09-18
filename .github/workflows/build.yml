@@ -1,11 +1,11 @@
 # Builds SongSplit.app on a macOS runner so every push and pull request
-# proves that src/main.swift compiles. The built app is attached to the run
+# proves that src/main.swift compiles (pushes to main/staging, every PR). The built app is attached to the run
 # as a downloadable artifact.
 name: Build app
 
 on:
   push:
-    branches: ["**"]
+    branches: [main, staging]
   pull_request:
   workflow_dispatch:
 
