@@ -1,0 +1,42 @@
+# Builds SongSplit.app on a macOS runner so every push and pull request
+# proves that src/main.swift compiles. The built app is attached to the run
+# as a downloadable artifact.
+name: Build app
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build SongSplit.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the build number (commit count) is right
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swiftc --version
+
+      - name: Build app
+        run: scripts/build_app.sh build
+
+      - name: Sanity-check bundle
+        run: |
+          test -x build/SongSplit.app/Contents/MacOS/SongSplit
+          /usr/libexec/PlistBuddy -c "Print" build/SongSplit.app/Contents/Info.plist
+
+      - name: Zip app
+        run: ditto -c -k --keepParent build/SongSplit.app build/SongSplit.zip
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: SongSplit-${{ github.sha }}
+          path: build/SongSplit.zip
+          if-no-files-found: error
