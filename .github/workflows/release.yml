@@ -1,0 +1,58 @@
+# Publishes a GitHub release when a vX.Y.Z tag is pushed. This is the CI
+# equivalent of scripts/release.sh: build SongSplit.app on a macOS runner,
+# zip it, and attach the zip to a release named after the tag. The app's
+# in-app update checker looks for exactly this: a release tagged vX.Y.Z
+# with a .zip asset.
+#
+# To ship a version: set VERSION to X.Y.Z on main, then push tag vX.Y.Z.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the build number (commit count) is right
+
+      - name: Fetch tag annotation
+        run: git fetch --force --tags origin
+
+      - name: Check tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          FILE="$(tr -d '[:space:]' < VERSION)"
+          if [ "$TAG" != "$FILE" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION file ($FILE)."
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+
+      - name: Build app
+        run: scripts/build_app.sh build
+
+      - name: Zip app
+        run: ditto -c -k --keepParent build/SongSplit.app "build/SongSplit-$VERSION.zip"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          WHAT="$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed '/^-----BEGIN PGP SIGNATURE-----/,$d')"
+          [ -n "$(printf '%s' "$WHAT" | tr -d '[:space:]')" ] || WHAT="See the commit history for what changed."
+          NOTES="$WHAT
+
+          **Install:** unzip, drag SongSplit.app to Applications. The app isn't notarized, so the first time, right-click it and choose Open. If you already have SongSplit, choose **Check for Updates…** in the app and it installs itself.
+          **Requires:** ffmpeg on your PATH (\`brew install ffmpeg\`). Song identification installs its own helper on first run.
+          **Build:** $(git rev-list --count HEAD) ($(git rev-parse --short HEAD)), $(date -u +'%Y-%m-%d %H:%M UTC')"
+          gh release create "$GITHUB_REF_NAME" "build/SongSplit-$VERSION.zip" \
+            --title "SongSplit $VERSION" --notes "$NOTES"
+          echo "Released $GITHUB_REF_NAME"
