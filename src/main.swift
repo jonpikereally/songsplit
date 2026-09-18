@@ -1,9 +1,128 @@
 // SongSplit — native macOS front end for songsplit.py
 // Build: swiftc -O main.swift -o SongSplit
 import Cocoa
+import UniformTypeIdentifiers
 
 let PY = "/usr/bin/python3"
 var SPLITTER = ""   // resolved at launch, relative to the .app
+
+// MARK: - build info (stamped into Info.plist by scripts/build_app.sh)
+
+enum BuildInfo {
+    static let info = Bundle.main.infoDictionary ?? [:]
+    static let version = info["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    static let build = info["CFBundleVersion"] as? String ?? "0"
+    static let date = info["SongSplitBuildDate"] as? String ?? "unknown date"
+    static let commit = info["SongSplitGitCommit"] as? String ?? "local"
+    static var summary: String { "Version \(version) (build \(build)) · built \(date) · \(commit)" }
+}
+
+// MARK: - updates (GitHub releases)
+
+struct UpdateError: LocalizedError {
+    let msg: String
+    init(_ m: String) { msg = m }
+    var errorDescription: String? { msg }
+}
+
+struct Release {
+    let version: String   // "1.2.0"
+    let notes: String
+    let zip: URL?         // first .zip asset, if any
+    let page: URL         // release page on GitHub
+}
+
+enum Updater {
+    static let repo = "jonpikereally/songsplit"
+    static let releasesPage = URL(string: "https://github.com/\(repo)/releases")!
+
+    static func fetchLatest(_ done: @escaping (Result<Release, Error>) -> Void) {
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("SongSplit/\(BuildInfo.version)", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 15
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            if let err = err { return done(.failure(err)) }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 404 { return done(.failure(UpdateError("No releases have been published yet."))) }
+            guard code == 200, let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = obj["tag_name"] as? String else {
+                return done(.failure(UpdateError("Unexpected reply from GitHub (HTTP \(code)).")))
+            }
+            let assets = obj["assets"] as? [[String: Any]] ?? []
+            let zip = assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }
+                .flatMap { ($0["browser_download_url"] as? String).flatMap { URL(string: $0) } }
+            let page = (obj["html_url"] as? String).flatMap { URL(string: $0) } ?? releasesPage
+            done(.success(Release(version: tag, notes: obj["body"] as? String ?? "",
+                                  zip: zip, page: page)))
+        }.resume()
+    }
+
+    // "v1.2.10" -> [1, 2, 10]
+    static func parts(_ s: String) -> [Int] {
+        s.drop { !$0.isNumber }.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+    }
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        var x = parts(a), y = parts(b)
+        while x.count < y.count { x.append(0) }
+        while y.count < x.count { y.append(0) }
+        return x.lexicographicallyPrecedes(y) == false && x != y
+    }
+
+    /// Downloads the zip, unpacks it, and returns the new .app inside a temp folder.
+    static func download(_ zip: URL, _ done: @escaping (Result<URL, Error>) -> Void) {
+        URLSession.shared.downloadTask(with: zip) { tmp, _, err in
+            if let err = err { return done(.failure(err)) }
+            guard let tmp = tmp else { return done(.failure(UpdateError("Download produced no file."))) }
+            do {
+                let fm = FileManager.default
+                let stage = fm.temporaryDirectory.appendingPathComponent("SongSplit-update-\(UUID().uuidString)")
+                try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+                let zipFile = stage.appendingPathComponent("SongSplit.zip")
+                try fm.moveItem(at: tmp, to: zipFile)
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                p.arguments = ["-x", "-k", zipFile.path, stage.path]
+                try p.run(); p.waitUntilExit()
+                guard p.terminationStatus == 0 else { throw UpdateError("Could not unpack the update.") }
+                let apps = try fm.contentsOfDirectory(at: stage, includingPropertiesForKeys: nil)
+                    .filter { $0.pathExtension == "app" }
+                guard let app = apps.first else { throw UpdateError("The update didn't contain an app.") }
+                done(.success(app))
+            } catch { done(.failure(error)) }
+        }.resume()
+    }
+
+    /// Swaps the running bundle for `newApp`; the old one goes to the Trash.
+    static func replaceRunningApp(with newApp: URL) throws {
+        let fm = FileManager.default
+        let current = Bundle.main.bundleURL
+        let parent = current.deletingLastPathComponent()
+        guard fm.isWritableFile(atPath: parent.path) else {
+            throw UpdateError("The folder containing SongSplit (\(parent.path)) isn't writable.")
+        }
+        let old = parent.appendingPathComponent("SongSplit (old).app")
+        try? fm.removeItem(at: old)
+        try fm.moveItem(at: current, to: old)
+        do { try fm.moveItem(at: newApp, to: current) } catch {
+            try? fm.moveItem(at: old, to: current)   // put the original back
+            throw error
+        }
+        if (try? fm.trashItem(at: old, resultingItemURL: nil)) == nil { try? fm.removeItem(at: old) }
+    }
+
+    /// Starts the (now replaced) app after this process exits.
+    static func relaunch() {
+        let path = Bundle.main.bundleURL.path
+        let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open -n \(quoted)"]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+}
 
 // MARK: - drop target
 
@@ -91,9 +210,22 @@ final class Controller: NSObject, NSApplicationDelegate {
 
         let sub = label("Split one long recording into separate, tagged songs.",
                         size: 12, weight: .regular, secondary: true)
-        sub.frame = NSRect(x: 24, y: 545, width: 600, height: 18)
+        sub.frame = NSRect(x: 24, y: 545, width: 400, height: 18)
         sub.autoresizingMask = [.minYMargin]
         root.addSubview(sub)
+
+        let ver = label(BuildInfo.summary, size: 11, weight: .regular, secondary: true)
+        ver.alignment = .right
+        ver.frame = NSRect(x: 336, y: 572, width: 400, height: 18)
+        ver.autoresizingMask = [.minXMargin, .minYMargin]
+        root.addSubview(ver)
+
+        let upd = button("Check for Updates…", #selector(checkForUpdatesClicked))
+        upd.controlSize = .small
+        upd.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        upd.frame = NSRect(x: 596, y: 543, width: 140, height: 22)
+        upd.autoresizingMask = [.minXMargin, .minYMargin]
+        root.addSubview(upd)
 
         drop = DropView(frame: NSRect(x: 24, y: 432, width: 712, height: 104))
         drop.autoresizingMask = [.width, .minYMargin]
@@ -176,6 +308,106 @@ final class Controller: NSObject, NSApplicationDelegate {
         refresh()
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // quiet check on launch; only speaks up if there's something newer
+        if UserDefaults.standard.object(forKey: "SongSplitAutoUpdateCheck") as? Bool ?? true {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.checkForUpdates(manual: false)
+            }
+        }
+    }
+
+    // ---------- about & updates
+    @objc func about() {
+        let credits = NSAttributedString(
+            string: "Build \(BuildInfo.build) · \(BuildInfo.date)\nCommit \(BuildInfo.commit)",
+            attributes: [.font: NSFont.systemFont(ofSize: 11),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+
+    @objc func checkForUpdatesClicked() { checkForUpdates(manual: true) }
+
+    func checkForUpdates(manual: Bool) {
+        if manual { setStatus("Checking for updates…", .secondaryLabelColor) }
+        Updater.fetchLatest { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .failure(let e):
+                    guard manual else { return }
+                    self.setStatus("Ready", .secondaryLabelColor)
+                    self.alert("Couldn't check for updates", e.localizedDescription)
+                case .success(let r):
+                    if Updater.isNewer(r.version, than: BuildInfo.version) {
+                        self.offer(r)
+                    } else if manual {
+                        self.setStatus("Up to date", .systemGreen)
+                        self.alert("You're up to date",
+                                   "SongSplit \(BuildInfo.version) (build \(BuildInfo.build)) is the latest version.")
+                    }
+                }
+            }
+        }
+    }
+
+    func offer(_ r: Release) {
+        if task != nil {
+            alert("Update available", "SongSplit \(r.version) is available. Finish or stop the current split, then choose Check for Updates… to install it.")
+            return
+        }
+        let a = NSAlert()
+        a.messageText = "SongSplit \(Updater.parts(r.version).map(String.init).joined(separator: ".")) is available"
+        var info = "You have \(BuildInfo.version) (build \(BuildInfo.build), \(BuildInfo.date))."
+        let notes = r.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !notes.isEmpty { info += "\n\n" + String(notes.prefix(600)) }
+        a.informativeText = info
+        a.addButton(withTitle: r.zip != nil ? "Download and Install" : "Open Download Page")
+        a.addButton(withTitle: "Later")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        if let zip = r.zip { install(zip, page: r.page) }
+        else { NSWorkspace.shared.open(r.page) }
+    }
+
+    func install(_ zip: URL, page: URL) {
+        setStatus("Downloading update…", .labelColor)
+        bar.startAnimation(nil)
+        goButton.isEnabled = false
+        Updater.download(zip) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.bar.stopAnimation(nil)
+                self.goButton.isEnabled = !self.audio.isEmpty
+                switch result {
+                case .failure(let e):
+                    self.setStatus("Update failed", .systemOrange)
+                    self.alert("Couldn't download the update", e.localizedDescription)
+                case .success(let newApp):
+                    do {
+                        try Updater.replaceRunningApp(with: newApp)
+                        self.setStatus("Installed — restarting…", .systemGreen)
+                        Updater.relaunch()
+                    } catch {
+                        self.setStatus("Update failed", .systemOrange)
+                        let a = NSAlert()
+                        a.messageText = "Couldn't install the update"
+                        a.informativeText = "\(error.localizedDescription)\n\nYou can download it yourself and replace SongSplit.app by hand."
+                        a.addButton(withTitle: "Open Download Page")
+                        a.addButton(withTitle: "Cancel")
+                        if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(page) }
+                    }
+                }
+            }
+        }
+    }
+
+    func setStatus(_ s: String, _ c: NSColor) { status.stringValue = s; status.textColor = c }
+
+    func alert(_ title: String, _ text: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        a.runModal()
     }
 
     // files dropped on the Dock icon / Finder icon
@@ -228,14 +460,15 @@ final class Controller: NSObject, NSApplicationDelegate {
         let p = NSOpenPanel()
         p.allowsMultipleSelection = true
         p.canChooseDirectories = false
-        p.allowedFileTypes = ["wav", "aif", "aiff", "flac", "mp3", "m4a"]
+        p.allowedContentTypes = ["wav", "aif", "aiff", "flac", "mp3", "m4a"]
+            .compactMap { UTType(filenameExtension: $0) }
         p.message = "Choose the recording to split"
         if p.runModal() == .OK { audio = p.urls; refresh() }
     }
     @objc func pickCSV() {
         let p = NSOpenPanel()
         p.allowsMultipleSelection = true
-        p.allowedFileTypes = ["csv"]
+        p.allowedContentTypes = [.commaSeparatedText]
         p.message = "Choose a playlist CSV"
         if p.runModal() == .OK { csvs = p.urls; refresh() }
     }
@@ -357,7 +590,12 @@ let menu = NSMenu()
 let appItem = NSMenuItem()
 menu.addItem(appItem)
 let appMenu = NSMenu()
-appMenu.addItem(withTitle: "About SongSplit", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+let aboutItem = NSMenuItem(title: "About SongSplit", action: #selector(Controller.about), keyEquivalent: "")
+aboutItem.target = controller
+appMenu.addItem(aboutItem)
+let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(Controller.checkForUpdatesClicked), keyEquivalent: "")
+updateItem.target = controller
+appMenu.addItem(updateItem)
 appMenu.addItem(NSMenuItem.separator())
 appMenu.addItem(withTitle: "Hide SongSplit", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
 appMenu.addItem(withTitle: "Quit SongSplit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
