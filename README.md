@@ -64,8 +64,9 @@ The `Release` workflow (`.github/workflows/release.yml`) builds and zips the app
 release with the zip attached. That release is what the in-app update check looks for. The tag's
 annotation message becomes the top of the release notes.
 
-No terminal needed: on GitHub choose **Releases ▸ Draft a new release**, type `vX.Y.Z` as a new tag
-targeting `main`, and publish. The workflow then builds the app and attaches the zip to that release.
+No terminal needed: on GitHub open **Actions ▸ Release ▸ Run workflow** and press the green button. The
+workflow tags `vX.Y.Z` from the `VERSION` file, builds the app, and publishes the release. Drafting a
+release named `vX.Y.Z` on the Releases page works too; the workflow then attaches the zip to it.
 
 `scripts/release.sh 1.2.0 "What changed"` does the same thing from a Mac with `gh` logged in.
 
