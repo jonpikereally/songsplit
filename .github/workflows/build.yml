@@ -32,6 +32,7 @@ jobs:
           test -x "$BIN"
           /usr/libexec/PlistBuddy -c "Print" build/SongSplit.app/Contents/Info.plist
           lipo -archs "$BIN"
+          test -s build/SongSplit.app/Contents/Resources/AppIcon.icns
           # The binary's minimum macOS must match Info.plist, or older Macs refuse to launch it.
           WANT="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" src/Info.plist)"
           for ARCH in arm64 x86_64; do

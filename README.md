@@ -47,7 +47,8 @@ scripts/build_app.sh        # builds build/SongSplit.app
 ```
 
 The build is stamped with the version from `VERSION`, the commit count as the build number,
-the short commit hash, and the build time.
+the short commit hash, and the build time. The app icon comes from `src/icon/AppIcon.png`;
+regenerate it with `python3 src/icon/make_icon.py` (needs Pillow) after editing that script.
 
 ### Cutting a release
 

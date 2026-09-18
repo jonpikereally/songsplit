@@ -36,6 +36,16 @@ rm -f "$OUT/SongSplit-arm64" "$OUT/SongSplit-x86_64"
 cp src/Info.plist "$PLIST"
 cp songsplit.py "$APP/Contents/Resources/songsplit.py"
 
+# App icon: src/icon/AppIcon.png (1024x1024, from src/icon/make_icon.py) -> AppIcon.icns
+ICONSET="$OUT/AppIcon.iconset"
+rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+for s in 16 32 128 256 512; do
+  sips -z "$s" "$s" src/icon/AppIcon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z "$((s*2))" "$((s*2))" src/icon/AppIcon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
+
 PB=/usr/libexec/PlistBuddy
 $PB -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
 $PB -c "Set :CFBundleVersion $BUILD" "$PLIST"
