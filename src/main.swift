@@ -338,6 +338,8 @@ final class Controller: NSObject, NSApplicationDelegate {
     var revealButton: NSButton!
     var dryBox: NSButton!
     var offlineBox: NSButton!
+    var artistNameBox: NSButton!
+    var artistFolderBox: NSButton!
 
     var audio: [URL] = []
     var csvs: [URL] = []
@@ -419,10 +421,18 @@ final class Controller: NSObject, NSApplicationDelegate {
             dropStack.widthAnchor.constraint(lessThanOrEqualTo: drop.widthAnchor, constant: -40),
         ])
 
-        // ----- options
+        // ----- options (naming choices are remembered between launches)
+        artistNameBox = checkbox("Artist in file name (Artist - Title.wav)", remember: "SongSplitArtistInName")
+        artistFolderBox = checkbox("Folder per artist", remember: "SongSplitArtistFolders")
         dryBox = checkbox("Preview only — write nothing")
         offlineBox = checkbox("Skip song identification (offline)")
-        let options = hstack([dryBox, offlineBox, spacer()], spacing: 24, alignment: .centerY)
+        let options = vstack([
+            hstack([artistNameBox, artistFolderBox, spacer()], spacing: 24, alignment: .centerY),
+            hstack([dryBox, offlineBox, spacer()], spacing: 24, alignment: .centerY),
+        ], spacing: 8, alignment: .leading)
+        for row in options.arrangedSubviews {
+            row.widthAnchor.constraint(equalTo: options.widthAnchor).isActive = true
+        }
 
         // ----- actions + status
         goButton = button("Split", symbol: "scissors", #selector(start))
@@ -661,10 +671,21 @@ final class Controller: NSObject, NSApplicationDelegate {
         tinted.isTemplate = false
         b.image = tinted
     }
-    func checkbox(_ title: String) -> NSButton {
+    /// A checkbox; with `remember`, its state is stored in UserDefaults under that key.
+    func checkbox(_ title: String, remember key: String? = nil) -> NSButton {
         let b = NSButton(checkboxWithTitle: title, target: nil, action: nil)
         b.translatesAutoresizingMaskIntoConstraints = false
+        if let key = key {
+            b.state = UserDefaults.standard.bool(forKey: key) ? .on : .off
+            b.identifier = NSUserInterfaceItemIdentifier(key)
+            b.target = self
+            b.action = #selector(rememberCheckbox(_:))
+        }
         return b
+    }
+    @objc func rememberCheckbox(_ sender: NSButton) {
+        guard let key = sender.identifier?.rawValue else { return }
+        UserDefaults.standard.set(sender.state == .on, forKey: key)
     }
     func spacer() -> NSView {
         let v = NSView()
@@ -788,6 +809,8 @@ final class Controller: NSObject, NSApplicationDelegate {
         var args = ["-u", SPLITTER, url.path] + csvs.map { $0.path }
         if dryBox.state == .on { args.append("--dry-run") }
         if offlineBox.state == .on { args.append("--no-shazam") }
+        if artistNameBox.state == .on { args.append("--artist-in-name") }
+        if artistFolderBox.state == .on { args.append("--artist-folders") }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: PY)

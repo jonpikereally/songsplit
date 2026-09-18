@@ -36,6 +36,8 @@ The window's top-right corner and the About panel show the version, build number
 | `--min-silence` | `1.0` | Minimum silence length (s) |
 | `--min-song` | `30` | Ignore segments shorter than this (s) |
 | `--no-shazam` | | Match CSV by duration only |
+| `--artist-in-name` | | Name files `Artist - Title.wav` instead of `Title.wav` |
+| `--artist-folders` | | Put each song in a folder named after its artist |
 | `--dry-run` | | Analyze and report, write nothing |
 
 ## Mac app
