@@ -28,8 +28,17 @@ jobs:
 
       - name: Sanity-check bundle
         run: |
-          test -x build/SongSplit.app/Contents/MacOS/SongSplit
+          BIN=build/SongSplit.app/Contents/MacOS/SongSplit
+          test -x "$BIN"
           /usr/libexec/PlistBuddy -c "Print" build/SongSplit.app/Contents/Info.plist
+          lipo -archs "$BIN"
+          # The binary's minimum macOS must match Info.plist, or older Macs refuse to launch it.
+          WANT="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" src/Info.plist)"
+          for ARCH in arm64 x86_64; do
+            GOT="$(otool -arch "$ARCH" -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+            echo "$ARCH minos=$GOT (want $WANT)"
+            [ "$GOT" = "$WANT" ] || { echo "Minimum macOS mismatch for $ARCH"; exit 1; }
+          done
 
       - name: Zip app
         run: ditto -c -k --keepParent build/SongSplit.app build/SongSplit.zip
