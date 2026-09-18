@@ -326,6 +326,8 @@ final class Controller: NSObject, NSApplicationDelegate {
     var dropIcon: NSImageView!
     var fileLabel: NSTextField!
     var csvLabel: NSTextField!
+    var audioButton: NSButton!
+    var csvButton: NSButton!
     var clearButton: NSButton!
     var status: StatusPill!
     var logView: NSTextView!
@@ -401,10 +403,10 @@ final class Controller: NSObject, NSApplicationDelegate {
         csvLabel.alignment = .center
         csvLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let pick = button("Choose Audio…", symbol: "folder", #selector(pickAudio))
-        let pickCsv = button("Add Playlist CSV…", symbol: "doc.text", #selector(pickCSV))
+        audioButton = button("Choose Audio…", symbol: "folder", #selector(pickAudio))
+        csvButton = button("Add Playlist CSV…", symbol: "doc.text", #selector(pickCSV))
         clearButton = button("Clear", symbol: "xmark.circle", #selector(clearFiles))
-        let pickRow = hstack([pick, pickCsv, clearButton], spacing: 8, alignment: .centerY)
+        let pickRow = hstack([audioButton, csvButton, clearButton], spacing: 8, alignment: .centerY)
 
         let dropStack = vstack([dropIcon, fileLabel, csvLabel, pickRow], spacing: 4, alignment: .centerX)
         dropStack.setCustomSpacing(10, after: dropIcon)
@@ -642,6 +644,23 @@ final class Controller: NSObject, NSApplicationDelegate {
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }
+    /// Shows on a picker button whether its file has been added: a green check
+    /// and "Change…" wording once loaded, the plain symbol and "Choose…" otherwise.
+    func mark(_ b: NSButton, loaded: Bool, idle: String, done: String, symbol name: String) {
+        b.title = loaded ? done : idle
+        guard loaded, let check = symbol("checkmark.circle.fill", 11, .semibold) else {
+            b.image = symbol(name, 11, .medium)
+            return
+        }
+        let tinted = NSImage(size: check.size, flipped: false) { rect in
+            check.draw(in: rect)
+            NSColor.systemGreen.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        b.image = tinted
+    }
     func checkbox(_ title: String) -> NSButton {
         let b = NSButton(checkboxWithTitle: title, target: nil, action: nil)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -704,6 +723,10 @@ final class Controller: NSObject, NSApplicationDelegate {
                 ? "No playlist CSV — titles will come from song identification"
                 : "Playlist: " + csvs.map { $0.lastPathComponent }.joined(separator: ", ")
         }
+        mark(audioButton, loaded: !audio.isEmpty,
+             idle: "Choose Audio…", done: "Change Audio…", symbol: "folder")
+        mark(csvButton, loaded: !csvs.isEmpty,
+             idle: "Add Playlist CSV…", done: "Change Playlist CSV…", symbol: "doc.text")
         clearButton.isEnabled = !(audio.isEmpty && csvs.isEmpty)
         goButton.isEnabled = !audio.isEmpty && task == nil
     }
@@ -769,6 +792,12 @@ final class Controller: NSObject, NSApplicationDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: PY)
         p.arguments = args
+        // Apps launched from Finder get a minimal PATH; make sure Homebrew's
+        // ffmpeg is visible to songsplit.py and the libraries it uses.
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin"] + [env["PATH"] ?? "/usr/bin:/bin"])
+            .joined(separator: ":")
+        p.environment = env
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
