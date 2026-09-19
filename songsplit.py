@@ -161,35 +161,58 @@ def detect_segments(ffmpeg, path, total, noise, min_silence, min_song,
     return segments
 
 
-def quietest_point(ffmpeg, path, center, radius=15.0):
-    """Find the quietest 0.5s window within center +/- radius, for cutting
-    between songs that have no real silence gap. Returns (time, drop_db):
-    how far below the region's average level that window sits. A genuine
-    boundary (fade-out, breath between tracks) is many dB down; a random
-    moment inside a song is not, and callers should refuse to cut there."""
-    start = max(0.0, center - radius)
+def find_cut(ffmpeg, path, want, max_radius=15.0):
+    """Find where to cut between two songs that have no silence gap, given
+    that the first song should end at about `want`.
+
+    Looks at want +/- max_radius for a level reference, but only considers
+    cut points within a few seconds of the expected boundary, nearest first:
+    the search widens in rings (1.5s, 3s, 6s) and stops at the first ring
+    with a genuinely quiet 0.5s window. Picking the single quietest window
+    across a wide span (as 1.4.1 did) let a soft intro of the next song, or
+    a pause near the end of this one, beat the real boundary and cut
+    mid-song. Track lengths from a playlist are good to about a second, so
+    anything far from `want` is more likely a moment inside a song.
+
+    Returns (time, drop_db, distance): how far below the span's average level
+    the window sits, and how far it is from `want`. drop_db is 0 when nothing
+    usable was found.
+    """
+    start = max(0.0, want - max_radius)
     r = subprocess.run(
-        [ffmpeg, "-v", "quiet", "-ss", f"{start:.3f}", "-t", f"{2 * radius:.3f}",
+        [ffmpeg, "-v", "quiet", "-ss", f"{start:.3f}", "-t", f"{2 * max_radius:.3f}",
          "-i", path, "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
         capture_output=True, check=True)
     samples = array.array("h")
     samples.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
-    if len(samples) < 8000:
-        return center, 0.0
-    win = 4000  # 0.5s at 8kHz
-    best_i, best_e = 0, float("inf")
-    # slide in 50ms steps using a running sum of squares
-    sq = [s * s for s in samples]
+    win, step, rate = 4000, 400, 8000.0            # 0.5s windows, 50ms apart
+    if len(samples) < 2 * win:
+        return want, 0.0, 0.0
     cum = [0]
-    for v in sq:
-        cum.append(cum[-1] + v)
-    for i in range(0, len(samples) - win, 400):
-        e = cum[i + win] - cum[i]
-        if e < best_e:
-            best_i, best_e = i, e
+    for v in samples:
+        cum.append(cum[-1] + v * v)
     mean_e = cum[-1] / len(samples) * win          # average energy per window
-    drop_db = 10 * math.log10(mean_e / best_e) if best_e > 0 and mean_e > 0 else 60.0
-    return start + (best_i + win / 2) / 8000.0, drop_db
+    if mean_e <= 0:
+        return want, 0.0, 0.0
+    windows = []                                   # (center_time, energy)
+    for i in range(0, len(samples) - win, step):
+        windows.append((start + (i + win / 2) / rate, cum[i + win] - cum[i]))
+
+    def drop(e):
+        return 10 * math.log10(mean_e / e) if e > 0 else 60.0
+
+    for ring in (1.5, 3.0, 6.0):
+        near = [(t, e) for t, e in windows if abs(t - want) <= ring]
+        if not near:
+            continue
+        t, e = min(near, key=lambda w: w[1])
+        if drop(e) >= QUIET_DB:
+            return t, drop(e), abs(t - want)
+    t, e = min(windows, key=lambda w: w[1])
+    return t, drop(e), abs(t - want)
+
+
+QUIET_DB = 15.0     # a cut point must sit this far below the average level
 
 
 def load_playlist(path):
@@ -228,7 +251,7 @@ class Identifier:
         and was written as a mislabeled extra file)."""
         length = b - a
         first = a + min(25.0, max(0.0, length - 14.0))
-        second = max(a + length * 0.6, first + 20.0)
+        second = first + 20.0        # still early: 60% in would land in the next song
         spots = [first] + ([second] if second + 12.0 <= b + 1.0 else [])
         for t in spots:
             out = self.identify(t)
@@ -316,10 +339,6 @@ def match_csv(tracks, seg_len=None, ident=None):
         for t in tracks:  # title-only fallback
             if norm(t["title"]) == nt:
                 return t
-        # Shazam knows what this is and it isn't in the playlist. Guessing a
-        # playlist row by length here used to relabel it as a different song
-        # and feed a wrong expected duration into the split pass.
-        return None
     if seg_len is not None:
         # Duration matching only. Accept it ONLY when exactly one playlist
         # track fits the length -- with a big CSV several tracks land within
@@ -495,7 +514,7 @@ def main():
     # -- repair pass 2: split segments that contain two or more songs
     SLACK = 10.0        # seconds over the expected length before we suspect a 2nd song
     CLEARLY_TWO = 45.0  # over this much, it is certainly two songs
-    QUIET_DB = 12.0     # a cut point must sit this far below the average level
+    NEAR = 6.0          # only trust a quiet point this close to the expected end
     final = []
     for it in merged:
         while True:
@@ -505,19 +524,19 @@ def main():
                 break
             title = (it["row"] or it["ident"] or {}).get("title", "?")
             want = it["a"] + args.lead_pad + exp          # where the music should end
-            cut, drop = quietest_point(ffmpeg, args.input, want)
-            if drop < QUIET_DB and extra <= CLEARLY_TWO:
-                print(f"  ** '{title}' runs {extra:.0f}s longer than expected and nothing "
-                      f"quiet was found near {want:.0f}s — left whole; it may be a longer "
-                      f"version, or contain the start of the next song")
-                break
-            if drop < QUIET_DB:
+            cut, drop, dist = find_cut(ffmpeg, args.input, want)
+            if drop >= QUIET_DB and dist <= NEAR:
+                print(f"  no silence gap after '{title}' — splitting at quiet point "
+                      f"{cut:.1f}s ({drop:.0f} dB down, {dist:.1f}s from expected end)")
+            elif extra > CLEARLY_TWO:
                 cut = want
                 print(f"  no silence gap after '{title}' and nothing quiet near "
                       f"{want:.0f}s — cutting at the expected end, {cut:.1f}s")
             else:
-                print(f"  no silence gap after '{title}' — splitting at quietest "
-                      f"point {cut:.1f}s ({drop:.0f} dB down)")
+                print(f"  ** '{title}' runs {extra:.0f}s longer than expected and nothing "
+                      f"quiet was found close to {want:.0f}s — left whole; it may be a longer "
+                      f"version, or contain the start of the next song")
+                break
             if cut - it["a"] < 10.0 or it["b"] - cut < 10.0:
                 break                                     # degenerate; keep whole
             final.append(dict(it, b=cut))
