@@ -116,49 +116,93 @@ def probe_duration(ffprobe, path):
     return float(json.loads(r.stdout)["format"]["duration"])
 
 
-def detect_segments(ffmpeg, path, total, noise, min_silence, min_song,
-                    lead_pad=0.3, tail_pad=1.5):
-    """Return (start, end) spans, one per song, with the silence between
-    songs trimmed away: each span begins lead_pad before its music starts
-    and ends tail_pad after its fade-out drops below the threshold."""
+BLIP = 0.3   # a sound shorter than this between two silences is noise (a click)
+
+
+def find_silences(ffmpeg, path, total, noise, min_silence):
+    """Silent stretches as (start, end) pairs, in order. A click or pop inside
+    a silence is ignored, so the silence either side of it counts as one."""
     r = subprocess.run(
         [ffmpeg, "-i", path, "-af",
          f"silencedetect=noise={noise}:d={min_silence}", "-f", "null", "-"],
         capture_output=True, text=True)
     starts = [float(m) for m in re.findall(r"silence_start: (-?[\d.]+)", r.stderr)]
     ends = [float(m) for m in re.findall(r"silence_end: (-?[\d.]+)", r.stderr)]
+    out = []
+    for i, st in enumerate(starts):
+        # Silence running to the end of the file may have no silence_end.
+        en = ends[i] if i < len(ends) else total
+        st, en = max(0.0, st), min(total, en)
+        if out and st - out[-1][1] < BLIP:
+            out[-1] = (out[-1][0], en)
+        elif en > st:
+            out.append((st, en))
+    return out
 
-    # Where does the music begin?  Skip any silence at the very start.
-    first = 0.0
-    if starts and starts[0] < 0.1 and ends:
-        first = max(0.0, ends[0] - lead_pad)
 
-    # Trailing silence at EOF gives a silence_start with no silence_end.
-    last = total
-    if len(starts) > len(ends):
-        last = min(total, starts[-1] + tail_pad)
+def segments_from_silences(silences, total, min_song, lead_pad=0.3, tail_pad=1.5):
+    """Return (start, end) spans, one per song. Each span begins lead_pad
+    before its first sound and ends tail_pad after its last, so silence
+    before, between and after songs is never included, however long it is.
 
-    # Between-song silences (only those following a song-length chunk).
-    gaps = []
-    cur = 0.0
-    for s, e in zip(starts, ends):
-        if s - cur >= min_song:
-            gaps.append((s, e))
-        cur = e
+    Every silence is a candidate boundary. A stretch of sound shorter than
+    min_song (a song's last few seconds after a quiet pause, a stray noise)
+    is joined to a neighbour across the SHORTER of the two silences beside
+    it, because the longer silence is the likelier gap between songs. The
+    old rule instead ignored any silence that came less than min_song after
+    the previous one, which could swallow a 20s gap into the next file."""
+    sounds, t = [], 0.0
+    for st, en in silences:
+        if st - t > 0.01:
+            sounds.append([t, st])
+        t = max(t, en)
+    if total - t > 0.01:
+        sounds.append([t, total])
+    if not sounds:
+        return []
 
-    segments = []
-    a = first
-    for s, e in gaps:
-        # End tail_pad after the fade-out, but never past the next song's
-        # lead-in: with a gap shorter than lead_pad + tail_pad the old cut
-        # let the next song's first beat bleed into this file.
-        b = min(s + tail_pad, max(s, e - lead_pad), total)
-        if b - a >= min_song:
-            segments.append((a, b))
-        a = max(e - lead_pad, 0.0)
-    if last - a >= min_song:
-        segments.append((a, last))
+    groups = sounds
+    while len(groups) > 1:
+        i = min(range(len(groups)), key=lambda k: groups[k][1] - groups[k][0])
+        if groups[i][1] - groups[i][0] >= min_song:
+            break
+        left = groups[i][0] - groups[i - 1][1] if i > 0 else float("inf")
+        right = groups[i + 1][0] - groups[i][1] if i + 1 < len(groups) else float("inf")
+        j = i - 1 if left <= right else i
+        groups[j] = [groups[j][0], groups[j + 1][1]]
+        del groups[j + 1]
+    if groups[0][1] - groups[0][0] < min_song and len(groups) == 1:
+        return []
+
+    segments, prev_end = [], 0.0
+    for k, (a, b) in enumerate(groups):
+        start = max(a - lead_pad, prev_end, 0.0)
+        end = b + tail_pad
+        if k + 1 < len(groups):
+            # never reach into the next song's lead-in
+            end = min(end, max(b, groups[k + 1][0] - lead_pad))
+        end = min(end, total)
+        segments.append((start, end))
+        prev_end = end
     return segments
+
+
+def detect_segments(ffmpeg, path, total, noise, min_silence, min_song,
+                    lead_pad=0.3, tail_pad=1.5):
+    silences = find_silences(ffmpeg, path, total, noise, min_silence)
+    return segments_from_silences(silences, total, min_song, lead_pad, tail_pad)
+
+
+def trim_to_sound(a, b, silences, lead_pad, tail_pad):
+    """Shrink [a, b] so it starts at most lead_pad before its first sound and
+    ends at most tail_pad after its last. Last line of defence, applied to
+    every file just before it is written."""
+    for st, en in silences:
+        if st <= a + 0.05 and a + lead_pad + 0.05 < en < b:
+            a = en - lead_pad
+        if a < st < b and en >= b - 0.05:
+            b = min(b, st + tail_pad)
+    return a, b
 
 
 def find_cut(ffmpeg, path, want, max_radius=15.0):
@@ -382,16 +426,14 @@ def track_path(meta, num, out_dir, artist_in_name=False, artist_folders=False):
     return rel
 
 
-def write_track(ffmpeg, src, a, b, is_last, meta, num, out_dir,
+def write_track(ffmpeg, src, a, b, meta, num, out_dir,
                 artist_in_name=False, artist_folders=False):
     artist = meta.get("artist") or "Unknown Artist"
     title = meta.get("title") or f"Track {num}"
     name = track_path(meta, num, out_dir, artist_in_name, artist_folders)
     dest = os.path.join(out_dir, name)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    cmd = [ffmpeg, "-y", "-v", "error", "-i", src, "-ss", f"{a:.3f}"]
-    if not is_last:
-        cmd += ["-to", f"{b:.3f}"]
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", src, "-ss", f"{a:.3f}", "-to", f"{b:.3f}"]
     ext = os.path.splitext(src)[1].lower()
     if ext == ".wav":
         codec = ["-c", "copy"]                 # sample-accurate, no re-encode
@@ -476,9 +518,9 @@ def main():
     total = probe_duration(ffprobe, args.input)
     print(f"Input: {args.input}  ({total:.1f}s)")
     print(f"Detecting silence (threshold {args.noise}, min {args.min_silence}s) ...")
-    segments = detect_segments(ffmpeg, args.input, total,
-                               args.noise, args.min_silence, args.min_song,
-                               args.lead_pad, args.tail_pad)
+    silences = find_silences(ffmpeg, args.input, total, args.noise, args.min_silence)
+    segments = segments_from_silences(silences, total, args.min_song,
+                                      args.lead_pad, args.tail_pad)
     if not segments:
         die("no song segments found — try a higher --noise like -35dB")
     print(f"Found {len(segments)} raw segments.")
@@ -549,6 +591,10 @@ def main():
     if not args.dry_run:
         os.makedirs(out_dir, exist_ok=True)
 
+    for it in final:
+        it["a"], it["b"] = trim_to_sound(it["a"], it["b"], silences,
+                                         args.lead_pad, args.tail_pad)
+
     print()
     for i, it in enumerate(final, 1):
         a, b, ident, row = it["a"], it["b"], it["ident"], it["row"]
@@ -568,7 +614,7 @@ def main():
               + ("  ** shorter than expected — possibly cut off" if short else ""))
 
         if not args.dry_run:
-            write_track(ffmpeg, args.input, a, b, i == len(final), meta, i, out_dir,
+            write_track(ffmpeg, args.input, a, b, meta, i, out_dir,
                         args.artist_in_name, args.artist_folders)
 
     if not args.dry_run:
