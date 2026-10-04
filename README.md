@@ -23,6 +23,14 @@ The window's top-right corner and the About panel show the version, build number
 - `ffmpeg` / `ffprobe` on your PATH: `brew install ffmpeg`
 - Internet on first run: Shazam support installs `shazamio` into `~/.songsplit-venv`
 
+## Error codes
+
+Every error and warning carries a code like `SS-302`, listed with causes and fixes in
+[ERRORS.md](ERRORS.md). Error dialogs in the app have a **Copy Error Details** button that copies
+the code, message, app version and macOS version, ready to paste into a chat with an LLM. When
+adding a new error, give it the next free code in its range and document it there; the Build
+workflow fails otherwise (`scripts/check_error_codes.py`).
+
 ## Command line
 
 ```sh
