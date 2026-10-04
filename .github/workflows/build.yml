@@ -18,6 +18,9 @@ jobs:
         with:
           fetch-depth: 0   # full history so the build number (commit count) is right
 
+      - name: Check every error has a code
+        run: python3 scripts/check_error_codes.py
+
       - name: Show toolchain
         run: |
           sw_vers

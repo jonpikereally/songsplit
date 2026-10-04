@@ -19,10 +19,21 @@ enum BuildInfo {
 
 // MARK: - updates (GitHub releases)
 
+/// Every error the app shows carries a code (SS-nnn) so it can be looked up in
+/// ERRORS.md or pasted into a chat with an LLM. 5xx: running a split, 6xx: updates.
+/// (1xx–4xx, 7xx and 9xx come from songsplit.py and appear in the log.)
+let errorsURL = URL(string: "https://github.com/jonpikereally/songsplit/blob/main/ERRORS.md")!
+
 struct UpdateError: LocalizedError {
+    let code: String
     let msg: String
-    init(_ m: String) { msg = m }
+    init(_ code: String, _ m: String) { self.code = code; msg = m }
     var errorDescription: String? { msg }
+}
+
+/// Wraps a system error with the code for the step that failed.
+func coded(_ code: String, _ e: Error) -> UpdateError {
+    (e as? UpdateError) ?? UpdateError(code, e.localizedDescription)
 }
 
 struct Release {
@@ -42,13 +53,13 @@ enum Updater {
         req.setValue("SongSplit/\(BuildInfo.version)", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 15
         URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err { return done(.failure(err)) }
+            if let err = err { return done(.failure(coded("SS-601", err))) }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 404 { return done(.failure(UpdateError("No releases have been published yet."))) }
+            if code == 404 { return done(.failure(UpdateError("SS-602", "No releases have been published yet."))) }
             guard code == 200, let data = data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = obj["tag_name"] as? String else {
-                return done(.failure(UpdateError("Unexpected reply from GitHub (HTTP \(code)).")))
+                return done(.failure(UpdateError("SS-603", "Unexpected reply from GitHub (HTTP \(code)).")))
             }
             let assets = obj["assets"] as? [[String: Any]] ?? []
             let zip = assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }
@@ -73,8 +84,8 @@ enum Updater {
     /// Downloads the zip, unpacks it, and returns the new .app inside a temp folder.
     static func download(_ zip: URL, _ done: @escaping (Result<URL, Error>) -> Void) {
         URLSession.shared.downloadTask(with: zip) { tmp, _, err in
-            if let err = err { return done(.failure(err)) }
-            guard let tmp = tmp else { return done(.failure(UpdateError("Download produced no file."))) }
+            if let err = err { return done(.failure(coded("SS-604", err))) }
+            guard let tmp = tmp else { return done(.failure(UpdateError("SS-604", "Download produced no file."))) }
             do {
                 let fm = FileManager.default
                 let stage = fm.temporaryDirectory.appendingPathComponent("SongSplit-update-\(UUID().uuidString)")
@@ -85,12 +96,12 @@ enum Updater {
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
                 p.arguments = ["-x", "-k", zipFile.path, stage.path]
                 try p.run(); p.waitUntilExit()
-                guard p.terminationStatus == 0 else { throw UpdateError("Could not unpack the update.") }
+                guard p.terminationStatus == 0 else { throw UpdateError("SS-605", "Could not unpack the update.") }
                 let apps = try fm.contentsOfDirectory(at: stage, includingPropertiesForKeys: nil)
                     .filter { $0.pathExtension == "app" }
-                guard let app = apps.first else { throw UpdateError("The update didn't contain an app.") }
+                guard let app = apps.first else { throw UpdateError("SS-606", "The update didn't contain an app.") }
                 done(.success(app))
-            } catch { done(.failure(error)) }
+            } catch { done(.failure(coded("SS-605", error))) }
         }.resume()
     }
 
@@ -100,14 +111,14 @@ enum Updater {
         let current = Bundle.main.bundleURL
         let parent = current.deletingLastPathComponent()
         guard fm.isWritableFile(atPath: parent.path) else {
-            throw UpdateError("The folder containing SongSplit (\(parent.path)) isn't writable.")
+            throw UpdateError("SS-607", "The folder containing SongSplit (\(parent.path)) isn't writable.")
         }
         let old = parent.appendingPathComponent("SongSplit (old).app")
         try? fm.removeItem(at: old)
-        try fm.moveItem(at: current, to: old)
+        do { try fm.moveItem(at: current, to: old) } catch { throw coded("SS-608", error) }
         do { try fm.moveItem(at: newApp, to: current) } catch {
             try? fm.moveItem(at: old, to: current)   // put the original back
-            throw error
+            throw coded("SS-608", error)
         }
         if (try? fm.trashItem(at: old, resultingItemURL: nil)) == nil { try? fm.removeItem(at: old) }
     }
@@ -345,6 +356,8 @@ final class Controller: NSObject, NSApplicationDelegate {
     var csvs: [URL] = []
     var task: Process?
     var outDir: String?
+    var lastCode: String?      // last SS-nnn error code seen in the splitter's output
+    var userStopped = false
 
     // ---------- layout
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -553,8 +566,9 @@ final class Controller: NSObject, NSApplicationDelegate {
                 switch result {
                 case .failure(let e):
                     guard manual else { return }
-                    self.setStatus("Ready", .tertiaryLabelColor)
-                    self.alert("Couldn't check for updates", e.localizedDescription)
+                    let err = coded("SS-601", e)
+                    self.setStatus("Update check failed · \(err.code)", .systemOrange)
+                    self.errorAlert("Couldn't check for updates", err)
                 case .success(let r):
                     if Updater.isNewer(r.version, than: BuildInfo.version) {
                         if manual { self.setStatus("Update available", .controlAccentColor) }
@@ -598,21 +612,22 @@ final class Controller: NSObject, NSApplicationDelegate {
                 self.goButton.isEnabled = !self.audio.isEmpty
                 switch result {
                 case .failure(let e):
-                    self.setStatus("Update failed", .systemOrange)
-                    self.alert("Couldn't download the update", e.localizedDescription)
+                    let err = coded("SS-604", e)
+                    self.setStatus("Update failed · \(err.code)", .systemOrange)
+                    self.errorAlert("Couldn't download the update", err)
                 case .success(let newApp):
                     do {
                         try Updater.replaceRunningApp(with: newApp)
                         self.setStatus("Installed — restarting…", .systemGreen)
                         Updater.relaunch()
                     } catch {
-                        self.setStatus("Update failed", .systemOrange)
-                        let a = NSAlert()
-                        a.messageText = "Couldn't install the update"
-                        a.informativeText = "\(error.localizedDescription)\n\nYou can download it yourself and replace SongSplit.app by hand."
-                        a.addButton(withTitle: "Open Download Page")
-                        a.addButton(withTitle: "Cancel")
-                        if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(page) }
+                        let err = coded("SS-608", error)
+                        self.setStatus("Update failed · \(err.code)", .systemOrange)
+                        if self.errorAlert("Couldn't install the update", err,
+                                           extra: "You can download it yourself and replace SongSplit.app by hand.",
+                                           action: "Open Download Page") {
+                            NSWorkspace.shared.open(page)
+                        }
                     }
                 }
             }
@@ -626,6 +641,44 @@ final class Controller: NSObject, NSApplicationDelegate {
         a.messageText = title
         a.informativeText = text
         a.runModal()
+    }
+
+    /// Text for troubleshooting: the code, the message, and enough about this
+    /// copy of the app and the Mac that an LLM (or a person) can act on it.
+    func errorDetails(_ title: String, _ err: UpdateError) -> String {
+        let os = ProcessInfo.processInfo.operatingSystemVersionString
+        return """
+        SongSplit error \(err.code): \(title)
+        \(err.msg)
+        App: SongSplit \(BuildInfo.version) (build \(BuildInfo.build), \(BuildInfo.commit), built \(BuildInfo.date))
+        macOS: \(os)
+        Error reference: \(errorsURL.absoluteString)
+        """
+    }
+
+    /// An error dialog that always shows its code and offers to copy the details.
+    /// With `action`, adds that button too and returns true when it was chosen.
+    @discardableResult
+    func errorAlert(_ title: String, _ err: UpdateError, extra: String? = nil,
+                    action: String? = nil) -> Bool {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = title
+        var info = err.msg
+        if let extra = extra { info += "\n\n" + extra }
+        info += "\n\nError code: \(err.code)"
+        a.informativeText = info
+        if let action = action { a.addButton(withTitle: action) }
+        a.addButton(withTitle: action == nil ? "OK" : "Cancel")
+        a.addButton(withTitle: "Copy Error Details")
+        let r = a.runModal()
+        let copyButton: NSApplication.ModalResponse = action == nil ? .alertSecondButtonReturn
+                                                                    : .alertThirdButtonReturn
+        if r == copyButton {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(errorDetails(title, err), forType: .string)
+        }
+        return action != nil && r == .alertFirstButtonReturn
     }
 
     // files dropped on the Dock icon / Finder icon
@@ -793,6 +846,8 @@ final class Controller: NSObject, NSApplicationDelegate {
         logView.string = ""
         logPlaceholder.isHidden = false
         outDir = nil
+        lastCode = nil
+        userStopped = false
         revealButton.isEnabled = false
         goButton.isEnabled = false
         stopButton.isEnabled = true
@@ -805,6 +860,11 @@ final class Controller: NSObject, NSApplicationDelegate {
         if audio.count > 1 {
             append("\n=== \(index + 1)/\(audio.count)  \(url.lastPathComponent) ===\n",
                    color: .secondaryLabelColor)
+        }
+        guard FileManager.default.fileExists(atPath: SPLITTER) else {
+            fail("SS-503", "The splitter script is missing from the app (\(SPLITTER)). "
+                 + "Download SongSplit again from the releases page.")
+            return
         }
         var args = ["-u", SPLITTER, url.path] + csvs.map { $0.path }
         if dryBox.state == .on { args.append("--dry-run") }
@@ -831,6 +891,10 @@ final class Controller: NSObject, NSApplicationDelegate {
             guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
             DispatchQueue.main.async {
                 var color: NSColor? = nil
+                if let r = s.range(of: #"SS-\d{3}"#, options: .regularExpression),
+                   s.contains("error [") {
+                    self?.lastCode = String(s[r])
+                }
                 if s.contains("**") || s.lowercased().contains("error") { color = .systemOrange }
                 else if s.contains("->") || s.range(of: #"^\s+\d+\."#,
                                                     options: .regularExpression) != nil {
@@ -851,26 +915,41 @@ final class Controller: NSObject, NSApplicationDelegate {
                 let next = index + 1
                 if proc.terminationStatus == 0 && next < self.audio.count {
                     self.runOne(index: next, url: self.audio[next])
-                } else {
+                } else if proc.terminationStatus == 0 || self.userStopped {
                     self.finish(ok: proc.terminationStatus == 0)
+                } else if let code = self.lastCode {
+                    self.finish(ok: false, code: code)
+                } else {
+                    self.fail("SS-502", "The splitter stopped unexpectedly "
+                              + "(exit status \(proc.terminationStatus)). See the log above.")
                 }
             }
         }
         do { try p.run() } catch {
-            append("could not start: \(error)\n", color: .systemRed)
-            finish(ok: false)
+            task = nil
+            fail("SS-501", "Could not start the splitter with \(PY): \(error.localizedDescription)")
         }
     }
 
-    func finish(ok: Bool) {
+    /// Logs an app-side error with its code and ends the run.
+    func fail(_ code: String, _ msg: String) {
+        append("\nerror [\(code)]: \(msg)\n  (look up \(code) in \(errorsURL.absoluteString))\n",
+               color: .systemRed)
+        finish(ok: false, code: code)
+    }
+
+    func finish(ok: Bool, code: String? = nil) {
         bar.stopAnimation(nil)
         stopButton.isEnabled = false
         goButton.isEnabled = !audio.isEmpty
-        setStatus(ok ? "Finished" : "Stopped", ok ? .systemGreen : .systemOrange)
+        if ok { setStatus("Finished", .systemGreen) }
+        else if let code = code { setStatus("Failed · \(code)", .systemRed) }
+        else { setStatus("Stopped", .systemOrange) }
         revealButton.isEnabled = (outDir != nil)
     }
 
     @objc func stop() {
+        userStopped = true
         task?.terminate()
         append("\nstopping…\n", color: .systemOrange)
     }
