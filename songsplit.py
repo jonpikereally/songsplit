@@ -51,9 +51,22 @@ VENV = os.path.expanduser("~/.songsplit-venv")
 
 # ---------------------------------------------------------------- helpers
 
-def die(msg):
-    print(f"error: {msg}", file=sys.stderr)
+# Every error and warning a user can see carries a code (SS-nnn), so it can be
+# looked up in ERRORS.md or pasted into a chat with an LLM. Ranges:
+#   1xx setup and input   2xx analysis   3xx song identification
+#   4xx writing files     7xx cut warnings (file written, check it)
+#   9xx unexpected        (5xx app, 6xx updates are raised by the Mac app)
+ERRORS_URL = "https://github.com/jonpikereally/songsplit/blob/main/ERRORS.md"
+
+
+def die(code, msg):
+    print(f"error [{code}]: {msg}", file=sys.stderr)
+    print(f"  (look up {code} in {ERRORS_URL})", file=sys.stderr)
     sys.exit(1)
+
+
+def warn(code, msg):
+    print(f"  ** [{code}] {msg}")
 
 
 def find_tool(name):
@@ -61,7 +74,8 @@ def find_tool(name):
         os.path.exists(f"/opt/homebrew/bin/{name}") and f"/opt/homebrew/bin/{name}"
     )
     if not path:
-        die(f"{name} not found. Install it with: brew install ffmpeg")
+        die("SS-101" if name == "ffmpeg" else "SS-102",
+            f"{name} not found. Install it with: brew install ffmpeg")
     return path
 
 
@@ -73,12 +87,18 @@ def ensure_shazamio():
     except ImportError:
         pass
     if os.environ.get("SONGSPLIT_BOOTSTRAPPED"):
-        die("failed to install shazamio in the private venv")
+        die("SS-301", f"song identification helper (shazamio) is not importable in {VENV}. "
+            f"Delete that folder and run again, or tick 'Skip song identification'.")
     py = os.path.join(VENV, "bin", "python3")
     if not os.path.exists(py):
         print("First run: creating private venv and installing shazamio ...")
-        subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
-        subprocess.run([py, "-m", "pip", "install", "-q", "shazamio"], check=True)
+        try:
+            subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
+            subprocess.run([py, "-m", "pip", "install", "-q", "shazamio"], check=True)
+        except (subprocess.CalledProcessError, OSError) as e:
+            shutil.rmtree(VENV, ignore_errors=True)
+            die("SS-301", f"could not install the song identification helper (shazamio): {e}. "
+                f"Check the internet connection and run again, or tick 'Skip song identification'.")
     env = dict(os.environ, SONGSPLIT_BOOTSTRAPPED="1")
     os.execve(py, [py] + sys.argv, env)
 
@@ -112,8 +132,12 @@ def probe_duration(ffprobe, path):
     r = subprocess.run(
         [ffprobe, "-v", "quiet", "-show_entries", "format=duration",
          "-of", "json", path],
-        capture_output=True, text=True, check=True)
-    return float(json.loads(r.stdout)["format"]["duration"])
+        capture_output=True, text=True)
+    try:
+        return float(json.loads(r.stdout)["format"]["duration"])
+    except (ValueError, KeyError, TypeError):
+        die("SS-107", f"could not read the length of {path}; "
+            f"it may be damaged or not an audio file")
 
 
 BLIP = 0.3   # a sound shorter than this between two silences is noise (a click)
@@ -226,7 +250,10 @@ def find_cut(ffmpeg, path, want, max_radius=15.0):
     r = subprocess.run(
         [ffmpeg, "-v", "quiet", "-ss", f"{start:.3f}", "-t", f"{2 * max_radius:.3f}",
          "-i", path, "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
-        capture_output=True, check=True)
+        capture_output=True)
+    if r.returncode != 0:
+        die("SS-202", f"ffmpeg could not read the audio around {want:.0f}s "
+            f"(exit status {r.returncode})")
     samples = array.array("h")
     samples.frombytes(r.stdout[: len(r.stdout) // 2 * 2])
     win, step, rate = 4000, 400, 8000.0            # 0.5s windows, 50ms apart
@@ -306,9 +333,13 @@ class Identifier:
     def identify(self, t):
         """Identify the song playing at time t. Returns dict or None."""
         clip = os.path.join(tempfile.gettempdir(), f"songsplit_clip_{os.getpid()}.ogg")
-        subprocess.run(
+        r = subprocess.run(
             [self.ffmpeg, "-y", "-v", "quiet", "-ss", f"{t:.2f}", "-t", "12",
-             "-i", self.path, "-ac", "1", "-ar", "44100", clip], check=True)
+             "-i", self.path, "-ac", "1", "-ar", "44100", clip])
+        if r.returncode != 0:
+            warn("SS-303", f"could not cut a sample at {t:.0f}s for song identification "
+                 f"(ffmpeg exit status {r.returncode}); this song is unidentified")
+            return None
         out = None
         for attempt in range(3):        # transient failures are usually rate limits
             try:
@@ -317,7 +348,8 @@ class Identifier:
                 break
             except Exception as e:
                 if attempt == 2:
-                    print(f"    (Shazam lookup at {t:.0f}s failed after 3 tries: {e})")
+                    warn("SS-302", f"Shazam lookup at {t:.0f}s failed after 3 tries: "
+                         f"{type(e).__name__}: {e}")
                 else:
                     time.sleep(4 * (attempt + 1))    # back off, then retry
         with contextlib.suppress(OSError):
@@ -432,7 +464,10 @@ def write_track(ffmpeg, src, a, b, meta, num, out_dir,
     title = meta.get("title") or f"Track {num}"
     name = track_path(meta, num, out_dir, artist_in_name, artist_folders)
     dest = os.path.join(out_dir, name)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+    except OSError as e:
+        die("SS-402", f"could not create the folder {os.path.dirname(dest)}: {e.strerror}")
     cmd = [ffmpeg, "-y", "-v", "error", "-i", src, "-ss", f"{a:.3f}", "-to", f"{b:.3f}"]
     ext = os.path.splitext(src)[1].lower()
     if ext == ".wav":
@@ -447,7 +482,10 @@ def write_track(ffmpeg, src, a, b, meta, num, out_dir,
         if meta.get(key):
             cmd += ["-metadata", f"{key}={meta[key]}"]
     cmd.append(dest)
-    subprocess.run(cmd, check=True)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        detail = (r.stderr or "").strip().splitlines()[-1:] or ["no detail"]
+        die("SS-401", f"could not write {dest}: {detail[0]}")
     return name
 
 
@@ -501,14 +539,14 @@ def main():
         elif args.input is None:
             args.input = f
         else:
-            die(f"more than one audio file given: {args.input!r} and {f!r}")
+            die("SS-106", f"more than one audio file given: {args.input!r} and {f!r}")
     if args.input is None:
-        die("no audio file given (only a .csv?)")
+        die("SS-105", "no audio file given (only a .csv?)")
     if not os.path.exists(args.input):
-        die(f"input not found: {args.input}")
+        die("SS-103", f"audio file not found: {args.input}")
     for c in csvs:
         if not os.path.exists(c):
-            die(f"playlist csv not found: {c}")
+            die("SS-104", f"playlist CSV not found: {c}")
 
     ffmpeg = find_tool("ffmpeg")
     ffprobe = find_tool("ffprobe")
@@ -522,12 +560,16 @@ def main():
     segments = segments_from_silences(silences, total, args.min_song,
                                       args.lead_pad, args.tail_pad)
     if not segments:
-        die("no song segments found — try a higher --noise like -35dB")
+        die("SS-201", "no songs found in the recording; it may be silent or too quiet "
+            "(on the command line, try a higher --noise like -35dB)")
     print(f"Found {len(segments)} raw segments.")
 
     tracks = []
     for c in csvs:
-        tracks.extend(load_playlist(c))
+        try:
+            tracks.extend(load_playlist(c))
+        except (OSError, UnicodeDecodeError, ValueError, csv.Error) as e:
+            die("SS-108", f"could not read the playlist CSV {c}: {type(e).__name__}: {e}")
     if csvs:
         print(f"Loaded {len(tracks)} playlist tracks from {len(csvs)} CSV file(s).")
 
@@ -572,12 +614,12 @@ def main():
                       f"{cut:.1f}s ({drop:.0f} dB down, {dist:.1f}s from expected end)")
             elif extra > CLEARLY_TWO:
                 cut = want
-                print(f"  no silence gap after '{title}' and nothing quiet near "
-                      f"{want:.0f}s — cutting at the expected end, {cut:.1f}s")
+                warn("SS-703", f"no silence gap after '{title}' and nothing quiet near "
+                     f"{want:.0f}s — cut at the expected end, {cut:.1f}s; check this file")
             else:
-                print(f"  ** '{title}' runs {extra:.0f}s longer than expected and nothing "
-                      f"quiet was found close to {want:.0f}s — left whole; it may be a longer "
-                      f"version, or contain the start of the next song")
+                warn("SS-702", f"'{title}' runs {extra:.0f}s longer than expected and nothing "
+                     f"quiet was found close to {want:.0f}s — left whole; it may be a longer "
+                     f"version, or contain the start of the next song")
                 break
             if cut - it["a"] < 10.0 or it["b"] - cut < 10.0:
                 break                                     # degenerate; keep whole
@@ -589,7 +631,10 @@ def main():
         os.path.dirname(os.path.abspath(args.input)),
         os.path.splitext(os.path.basename(args.input))[0] + " Split")
     if not args.dry_run:
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            die("SS-402", f"could not create the output folder {out_dir}: {e.strerror}")
 
     for it in final:
         it["a"], it["b"] = trim_to_sound(it["a"], it["b"], silences,
@@ -611,7 +656,7 @@ def main():
         short = exp and seg_len < exp - 15
         label = f"{meta.get('artist', '?')} - {meta.get('title', '?')}"
         print(f"  {i:02d}. [{a:8.2f} - {b:8.2f}] {seg_len:6.1f}s  {label}  ({src_note})"
-              + ("  ** shorter than expected — possibly cut off" if short else ""))
+              + ("  ** [SS-701] shorter than expected — possibly cut off" if short else ""))
 
         if not args.dry_run:
             write_track(ffmpeg, args.input, a, b, meta, i, out_dir,
@@ -622,4 +667,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        die("SS-900", "unexpected error (details above); please report it with this log")
