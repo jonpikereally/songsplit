@@ -38,6 +38,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -436,6 +437,143 @@ def same_song(x, y):
     return False
 
 
+# ---------------------------------------------------------------- tags
+#
+# DJ software (djay, Serato, rekordbox, Traktor) reads a WAV's metadata from
+# an ID3 tag stored in an "id3 " chunk, and generally ignores the RIFF INFO
+# list. ffmpeg's WAV writer only writes INFO (it has no option for ID3), so
+# SongSplit adds the ID3 chunk itself. Version 2.3 is the one DJ software
+# supports most widely.
+
+ID3_FIELDS = (("TIT2", "title"), ("TPE1", "artist"), ("TALB", "album"),
+              ("TYER", "year"), ("TCON", "genre"))
+INFO_FIELDS = {b"INAM": "title", b"IART": "artist", b"IPRD": "album",
+               b"ICRD": "date", b"IGNR": "genre"}
+
+
+def _id3_frame(fid, text):
+    try:
+        data = b"\x00" + text.encode("latin-1")            # plain text where possible
+    except UnicodeEncodeError:
+        data = b"\x01\xff\xfe" + text.encode("utf-16-le")  # UTF-16 with BOM otherwise
+    return fid.encode() + struct.pack(">I", len(data)) + b"\x00\x00" + data
+
+
+def id3v23_tag(meta):
+    """An ID3v2.3 tag (bytes) holding title, artist, album, year and genre."""
+    meta = dict(meta)
+    m = re.match(r"\s*(\d{4})", meta.get("date") or "")
+    meta["year"] = m.group(1) if m else ""
+    frames = b"".join(_id3_frame(fid, str(meta[key]).strip())
+                      for fid, key in ID3_FIELDS if str(meta.get(key) or "").strip())
+    body = frames + b"\x00" * 512                         # padding, for later edits
+    n = len(body)
+    size = bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
+    return b"ID3\x03\x00\x00" + size + body
+
+
+def wav_chunks(f):
+    """List (id, offset, size) for each chunk in an open WAV file, and the
+    offset just past the last one. Raises ValueError if it isn't a WAV."""
+    f.seek(0)
+    head = f.read(12)
+    if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+        raise ValueError("not a RIFF/WAVE file")
+    f.seek(0, os.SEEK_END)
+    end = f.tell()
+    chunks, pos = [], 12
+    while pos + 8 <= end:
+        f.seek(pos)
+        cid, size = struct.unpack("<4sI", f.read(8))
+        if pos + 8 + size > end:                          # truncated last chunk
+            break
+        chunks.append((cid, pos, size))
+        pos += 8 + size + (size & 1)
+    return chunks, min(pos, end)
+
+
+def has_id3(chunks):
+    return any(cid.lower() == b"id3 " for cid, _, _ in chunks)
+
+
+def add_id3(path, meta):
+    """Append an "id3 " chunk to a WAV. Leaves the file alone and returns
+    False if it already has one (e.g. with Serato cue points in it)."""
+    tag = id3v23_tag(meta)
+    with open(path, "r+b") as f:
+        chunks, end = wav_chunks(f)
+        if has_id3(chunks):
+            return False
+        f.seek(end)
+        f.truncate()
+        f.write(b"id3 " + struct.pack("<I", len(tag)) + tag + b"\x00" * (len(tag) & 1))
+        total = f.tell()
+        f.seek(4)
+        f.write(struct.pack("<I", total - 8))
+    return True
+
+
+def read_info(f, chunks):
+    """Title, artist, album, date and genre from a WAV's RIFF INFO list."""
+    meta = {}
+    for cid, pos, size in chunks:
+        if cid != b"LIST":
+            continue
+        f.seek(pos + 8)
+        body = f.read(size)
+        if body[:4] != b"INFO":
+            continue
+        p = 4
+        while p + 8 <= len(body):
+            key, n = struct.unpack("<4sI", body[p:p + 8])
+            raw = body[p + 8:p + 8 + n].split(b"\x00")[0]
+            if key in INFO_FIELDS:
+                try:
+                    meta[INFO_FIELDS[key]] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    meta[INFO_FIELDS[key]] = raw.decode("latin-1")
+            p += 8 + n + (n & 1)
+    return meta
+
+
+def retag_folder(folder, dry_run=False):
+    """Give every WAV under `folder` that has no ID3 tag one copied from its
+    RIFF INFO list, so DJ software can read it. Files that already have an
+    ID3 tag are never touched."""
+    if not os.path.isdir(folder):
+        die("SS-109", f"folder not found: {folder}")
+    added = had = untagged = failed = 0
+    print(f"Adding ID3 tags to WAV files in {folder}" + (" (preview only)" if dry_run else ""))
+    for root, dirs, files in os.walk(folder):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.lower().endswith(".wav") or name.startswith("."):
+                continue
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, folder)
+            try:
+                with open(path, "rb") as f:
+                    chunks, _ = wav_chunks(f)
+                    if has_id3(chunks):
+                        had += 1
+                        continue
+                    meta = read_info(f, chunks)
+                if not (meta.get("title") or meta.get("artist")):
+                    untagged += 1
+                    print(f"  skipped (no tags to copy): {rel}")
+                    continue
+                if not dry_run:
+                    add_id3(path, meta)
+                added += 1
+                print(f"  tagged: {rel}  [{meta.get('artist', '?')} - {meta.get('title', '?')}]")
+            except (OSError, ValueError) as e:
+                failed += 1
+                warn("SS-403", f"could not add an ID3 tag to {rel}: {e}")
+    lead = "Preview done. Would add ID3 tags to" if dry_run else "Done. Added ID3 tags to"
+    print(f"\n{lead} {added} file(s). Already had one: {had}. "
+          f"No tags to copy: {untagged}. Failed: {failed}.")
+
+
 # ---------------------------------------------------------------- output
 
 def safe_name(s):
@@ -476,8 +614,7 @@ def write_track(ffmpeg, src, a, b, meta, num, out_dir,
         codec = ["-c:a", "pcm_s24le"]          # lossless sources: keep the bits
     else:
         codec = ["-c:a", "pcm_s16le"]          # mp3/m4a: decode into the .wav
-    cmd += codec + ["-write_id3v2", "1",
-                    "-metadata", f"title={title}", "-metadata", f"artist={artist}"]
+    cmd += codec + ["-metadata", f"title={title}", "-metadata", f"artist={artist}"]
     for key in ("album", "date", "genre"):
         if meta.get(key):
             cmd += ["-metadata", f"{key}={meta[key]}"]
@@ -486,6 +623,10 @@ def write_track(ffmpeg, src, a, b, meta, num, out_dir,
     if r.returncode != 0:
         detail = (r.stderr or "").strip().splitlines()[-1:] or ["no detail"]
         die("SS-401", f"could not write {dest}: {detail[0]}")
+    try:
+        add_id3(dest, dict(meta, title=title, artist=artist))
+    except (OSError, ValueError) as e:
+        die("SS-403", f"could not add the ID3 tag to {dest}: {e}")
     return name
 
 
@@ -511,7 +652,7 @@ def expected_dur(item):
 
 def main():
     ap = argparse.ArgumentParser(description="Split a concatenated WAV into tagged songs.")
-    ap.add_argument("files", nargs="+",
+    ap.add_argument("files", nargs="*",
                     help="audio file to split, and optionally a playlist .csv (any order)")
     ap.add_argument("--csv")
     ap.add_argument("--out")
@@ -528,7 +669,14 @@ def main():
     ap.add_argument("--artist-folders", action="store_true",
                     help="put each song in a folder named after its artist")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--retag", metavar="FOLDER",
+                    help="add DJ-readable ID3 tags to already-split WAVs in FOLDER "
+                         "(copied from their RIFF INFO tags), then exit")
     args = ap.parse_args()
+
+    if args.retag:
+        retag_folder(args.retag, args.dry_run)
+        return
 
     # Sort positional files by type: .csv -> playlist, anything else -> audio.
     args.input = None

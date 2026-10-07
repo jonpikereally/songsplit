@@ -21,6 +21,23 @@ jobs:
       - name: Check every error has a code
         run: python3 scripts/check_error_codes.py
 
+      - name: Check macOS reads SongSplit's tags
+        run: |
+          # A WAV whose ONLY metadata is the ID3 chunk SongSplit writes, so a
+          # pass proves Mac apps (and DJ software built on Apple's frameworks)
+          # read it, not some other tag.
+          python3 - <<'PY'
+          import sys, wave
+          sys.path.insert(0, ".")
+          from songsplit import add_id3
+          with wave.open("tagtest.wav", "wb") as w:
+              w.setnchannels(2); w.setsampwidth(2); w.setframerate(44100)
+              w.writeframes(b"\0" * 44100 * 4)
+          add_id3("tagtest.wav", {"title": "Déjà Vu", "artist": "Beyoncé feat. Jay-Z",
+                                  "album": "B'Day", "date": "2006", "genre": "R&B"})
+          PY
+          swift scripts/check_tags_macos.swift tagtest.wav "Déjà Vu" "Beyoncé feat. Jay-Z"
+
       - name: Show toolchain
         run: |
           sw_vers
