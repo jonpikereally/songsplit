@@ -3,6 +3,9 @@
 import array, json, os, re, subprocess, sys, time
 import urllib.parse, urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from songsplit import add_id3   # ffmpeg can't write ID3 into a WAV; DJ software needs it
+
 FFMPEG = "/opt/homebrew/bin/ffmpeg"
 ROOT = "/Volumes/Jons 16TB HDD/hi res"
 APPLY = "--apply" in sys.argv
@@ -73,7 +76,7 @@ def write(src, dest, title, artist, start=None, end=None):
         cmd += ["-ss", f"{start:.3f}"]
     if end is not None:
         cmd += ["-to", f"{end:.3f}"]
-    cmd += ["-c", "copy", "-write_id3v2", "1",
+    cmd += ["-c", "copy",
             "-metadata", f"title={title}", "-metadata", f"artist={artist}",
             "-metadata", f"album={meta.get('album') or ''}",
             "-metadata", f"date={meta.get('date') or ''}",
@@ -82,6 +85,7 @@ def write(src, dest, title, artist, start=None, end=None):
     print(f"       album={meta.get('album')} date={meta.get('date')} genre={meta.get('genre')}")
     if APPLY:
         subprocess.run(cmd, check=True)
+        add_id3(dest, {"title": title, "artist": artist, **meta})
 
 
 def uniq(folder, title):
