@@ -841,8 +841,8 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     // ---------- run
-    @objc func start() {
-        guard task == nil, let first = audio.first else { return }
+    /// Clears the log and puts the window into its busy state.
+    func beginRun() {
         logView.string = ""
         logPlaceholder.isHidden = false
         outDir = nil
@@ -853,7 +853,36 @@ final class Controller: NSObject, NSApplicationDelegate {
         stopButton.isEnabled = true
         bar.startAnimation(nil)
         setStatus("Working…", .controlAccentColor, busy: true)
+    }
+
+    @objc func start() {
+        guard task == nil, let first = audio.first else { return }
+        beginRun()
         runOne(index: 0, url: first)
+    }
+
+    /// File ▸ Add DJ Tags to Existing Files…: gives already-split WAVs that
+    /// lack one an ID3 tag, so DJ software can read their title and artist.
+    @objc func retagExisting() {
+        guard task == nil else { return }
+        let p = NSOpenPanel()
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.allowsMultipleSelection = false
+        p.prompt = "Add Tags"
+        p.message = "Choose a folder of split songs. Songs without an ID3 tag get one, so djay, "
+            + "Serato, rekordbox and Traktor can read their title and artist. "
+            + "Songs that already have one are not changed."
+        guard p.runModal() == .OK, let folder = p.url else { return }
+        beginRun()
+        guard FileManager.default.fileExists(atPath: SPLITTER) else {
+            fail("SS-503", "The splitter script is missing from the app (\(SPLITTER)). "
+                 + "Download SongSplit again from the releases page.")
+            return
+        }
+        var args = ["-u", SPLITTER, "--retag", folder.path]
+        if dryBox.state == .on { args.append("--dry-run") }
+        launch(args) { [weak self] status in self?.endRun(status) }
     }
 
     func runOne(index: Int, url: URL) {
@@ -872,6 +901,20 @@ final class Controller: NSObject, NSApplicationDelegate {
         if artistNameBox.state == .on { args.append("--artist-in-name") }
         if artistFolderBox.state == .on { args.append("--artist-folders") }
 
+        launch(args) { [weak self] status in
+            guard let self = self else { return }
+            let next = index + 1
+            if status == 0 && next < self.audio.count {
+                self.runOne(index: next, url: self.audio[next])
+            } else {
+                self.endRun(status)
+            }
+        }
+    }
+
+    /// Runs songsplit.py with `args`, streaming its output into the log, and
+    /// calls `then` on the main thread with its exit status.
+    func launch(_ args: [String], then: @escaping (Int32) -> Void) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: PY)
         p.arguments = args
@@ -912,22 +955,24 @@ final class Controller: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 pipe.fileHandleForReading.readabilityHandler = nil
                 self.task = nil
-                let next = index + 1
-                if proc.terminationStatus == 0 && next < self.audio.count {
-                    self.runOne(index: next, url: self.audio[next])
-                } else if proc.terminationStatus == 0 || self.userStopped {
-                    self.finish(ok: proc.terminationStatus == 0)
-                } else if let code = self.lastCode {
-                    self.finish(ok: false, code: code)
-                } else {
-                    self.fail("SS-502", "The splitter stopped unexpectedly "
-                              + "(exit status \(proc.terminationStatus)). See the log above.")
-                }
+                then(proc.terminationStatus)
             }
         }
         do { try p.run() } catch {
             task = nil
             fail("SS-501", "Could not start the splitter with \(PY): \(error.localizedDescription)")
+        }
+    }
+
+    /// Final status for a run, from the splitter's exit status.
+    func endRun(_ status: Int32) {
+        if status == 0 || userStopped {
+            finish(ok: status == 0)
+        } else if let code = lastCode {
+            finish(ok: false, code: code)
+        } else {
+            fail("SS-502", "The splitter stopped unexpectedly "
+                 + "(exit status \(status)). See the log above.")
         }
     }
 
@@ -986,6 +1031,14 @@ appMenu.addItem(NSMenuItem.separator())
 appMenu.addItem(withTitle: "Hide SongSplit", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
 appMenu.addItem(withTitle: "Quit SongSplit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 appItem.submenu = appMenu
+let fileItem = NSMenuItem()
+menu.addItem(fileItem)
+let fileMenu = NSMenu(title: "File")
+let retagItem = NSMenuItem(title: "Add DJ Tags to Existing Files…",
+                           action: #selector(Controller.retagExisting), keyEquivalent: "")
+retagItem.target = controller
+fileMenu.addItem(retagItem)
+fileItem.submenu = fileMenu
 let editItem = NSMenuItem()
 menu.addItem(editItem)
 let editMenu = NSMenu(title: "Edit")

@@ -23,6 +23,17 @@ The window's top-right corner and the About panel show the version, build number
 - `ffmpeg` / `ffprobe` on your PATH: `brew install ffmpeg`
 - Internet on first run: Shazam support installs `shazamio` into `~/.songsplit-venv`
 
+## Tags
+
+Each song is written as a WAV with two sets of tags: an ID3 v2.3 tag, which DJ software (djay,
+Serato, rekordbox, Traktor) reads, and a RIFF INFO list for everything else. Both hold title,
+artist, album, year and genre.
+
+Songs split before 1.5.1 have only the INFO list, so DJ software shows them blank. To fix them,
+choose **File ▸ Add DJ Tags to Existing Files…** in the app and pick the folder. Songs that
+already have an ID3 tag, such as ones carrying Serato cue points, are left untouched. On the
+command line: `./songsplit.py --retag FOLDER` (add `--dry-run` to preview).
+
 ## Error codes
 
 Every error and warning carries a code like `SS-302`, listed with causes and fixes in
