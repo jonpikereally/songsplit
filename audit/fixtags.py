@@ -16,6 +16,9 @@ import urllib.parse, urllib.request
 os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
 from shazamio import Shazam
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from songsplit import add_id3   # ffmpeg can't write ID3 into a WAV; DJ software needs it
+
 FFMPEG = "/opt/homebrew/bin/ffmpeg"
 FFPROBE = "/opt/homebrew/bin/ffprobe"
 SAMPLES = (0.15, 0.45, 0.75)
@@ -127,12 +130,13 @@ async def main():
                 n += 1
             tmp = os.path.join(folder, ".tmp_" + name)
             cmd = [FFMPEG, "-y", "-v", "error", "-i", os.path.join(folder, name),
-                   "-c", "copy", "-write_id3v2", "1",
+                   "-c", "copy",
                    "-metadata", f"title={title}", "-metadata", f"artist={artist}",
                    "-metadata", f"album={extra.get('album') or ''}",
                    "-metadata", f"date={extra.get('date') or ''}",
                    "-metadata", f"genre={extra.get('genre') or ''}", tmp]
             subprocess.run(cmd, check=True)
+            add_id3(tmp, {"title": title, "artist": artist, **extra})
             os.replace(tmp, os.path.join(folder, name))
             os.rename(os.path.join(folder, name), dest)
             print(f"         WROTE {os.path.basename(dest)}")

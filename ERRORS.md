@@ -54,6 +54,10 @@ or not audio. Fix: open it in another player to check it plays; re-export it if 
 [Exportify](https://exportify.net) export with columns like `Track Name`, `Artist Name(s)` and
 `Duration (ms)`. Fix: export the playlist again.
 
+### SS-109
+**Folder not found** when adding tags to existing files. The folder was moved, renamed or its
+drive was disconnected. Fix: choose it again.
+
 ## SS-2xx · Analysing the recording
 
 ### SS-201
@@ -97,6 +101,13 @@ space or choose a recording on a writable drive. The output folder is next to th
 
 ### SS-402
 **Could not create the output folder**, or an artist folder inside it. Same causes as SS-401.
+
+### SS-403
+**Could not add the ID3 tag to a file.** The ID3 tag is what DJ software such as djay, Serato,
+rekordbox and Traktor reads for title and artist. During a split this stops the run; when adding
+tags to existing files, that file is skipped and the rest continue. The message gives the
+reason: usually no permission to write the file, a disconnected drive, or a file that is not a
+valid WAV.
 
 ## SS-5xx · Running a split (app)
 
